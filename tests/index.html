@@ -8,6 +8,7 @@
 <script type="module">
 // Open http://localhost:8080/tests/ to run. Covers the day counter and reset rules.
 import * as C from '../js/challenge.js';
+import * as K from '../js/calories.js';
 
 const out = document.getElementById('out');
 let failed = 0;
@@ -121,6 +122,42 @@ test('restart records the abandoned run', () => {
   const r = C.restart(s, '2026-10-31', at('2026-10-31'));
   eq(r.attempts[0].result, 'restarted');
   eq(r.attempts[0].daysCompleted, 11);
+});
+
+const base = { ...K.defaultProfile(), units: 'metric', age: '30', heightCm: '180', weightKg: '80' };
+
+test('Mifflin-St Jeor resting rate (male and female)', () => {
+  eq(K.estimate(base).bmr, 1780); // 800 + 1125 - 150 + 5
+  eq(K.estimate({ ...base, sex: 'female' }).bmr, 1610); // 1614 rounded to 10
+});
+
+test('activity factor and goal adjust the totals', () => {
+  const e = K.estimate({ ...base, activity: 'moderate', goal: 'lose1' });
+  eq(e.tdee, 2760); // 1780 * 1.55 = 2759
+  eq(e.target, 2260);
+});
+
+test('targets never drop below the safe minimum', () => {
+  const e = K.estimate({ ...base, sex: 'female', age: '70', heightCm: '150', weightKg: '45', activity: 'sedentary', goal: 'lose1' });
+  eq(e.target, 1200);
+  eq(e.floored, true);
+});
+
+test('imperial inputs match metric', () => {
+  const imp = { ...K.defaultProfile(), age: '30', heightFt: '5', heightIn: '11', weightLb: '176' };
+  const e = K.estimate(imp);
+  eq(Math.abs(e.bmr - 1780) <= 10, true);
+});
+
+test('incomplete or implausible input gives no estimate', () => {
+  eq(K.estimate(K.defaultProfile()), null);
+  eq(K.estimate({ ...base, age: '5' }), null);
+});
+
+test('unit switch converts entered values', () => {
+  const imp = K.convertUnits(base, 'imperial');
+  eq([imp.heightFt, imp.heightIn, imp.weightLb], ['5', '11', '176']);
+  eq(K.convertUnits(imp, 'metric').heightCm, '180');
 });
 
 out.innerHTML += failed ? `\n<span class="fail">${failed} FAILED</span>` : '\n<span class="pass">ALL PASSED</span>';

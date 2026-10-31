@@ -5,6 +5,7 @@ import * as store from './store.js';
 import * as fx from './feedback.js';
 import * as clock from './clock.js';
 import { prepareImage } from './photo.js';
+import * as K from './calories.js';
 
 const screen = document.getElementById('screen');
 const overlay = document.getElementById('overlay');
@@ -37,6 +38,7 @@ async function init() {
     toast(`Storage unavailable: ${err.message}`);
   }
   state.settings = { ...C.defaultState().settings, ...state.settings };
+  state.profile = { ...K.defaultProfile(), ...state.profile };
   applySettings();
   evaluateNow();
   render();
@@ -98,7 +100,7 @@ function render() {
     else b.removeAttribute('aria-current');
   }
   renderOverlay();
-  const screens = { today: renderToday, calendar: () => placeholder('Calendar', 2), photos: () => placeholder('Photos', 3), stats: () => placeholder('Stats', 2), settings: renderSettings };
+  const screens = { today: renderToday, calendar: () => placeholder('Calendar', 2), photos: () => placeholder('Photos', 3), stats: renderStats, settings: renderSettings };
   screen.innerHTML = screens[tab]();
   screen.dataset.screen = tab;
   if (tab === 'today') loadThumb();
@@ -202,7 +204,7 @@ function taskCards(day) {
     ${workout('workout1', 'Workout #1')}
     ${workout('workout2', 'Workout #2')}
     <p id="outdoor-hint" class="hint"></p>
-    ${toggle('diet', 'Follow diet', 'No cheat meals')}
+    ${toggle('diet', 'Follow diet', dietSub())}
     ${toggle('alcohol', 'No alcohol', 'Zero drinks today')}
 
     <div class="card water ${s.water ? 'done' : ''}" data-task="water">
@@ -244,6 +246,11 @@ function taskCards(day) {
         <span class="card-text"><span class="card-title">Progress photo</span><span class="card-sub">${day.photo ? 'Tap to retake' : 'Tap to take or choose'}</span></span>${CHECK}
       </label>
     </div>`;
+}
+
+function dietSub() {
+  const est = K.estimate(state.profile);
+  return est ? `No cheat meals · ${est.target.toLocaleString()} cal target` : 'No cheat meals';
 }
 
 // Update completion markers in place (keeps keyboard focus while typing).
@@ -393,6 +400,68 @@ function renderSettings() {
   </section>`;
 }
 
+function renderStats() {
+  const p = state.profile;
+  const imperial = p.units === 'imperial';
+  const seg = (key, value, label) =>
+    `<button class="seg-btn ${p[key] === value ? 'on' : ''}" data-action="profile" data-key="${key}" data-v="${value}" aria-pressed="${p[key] === value}"><b>${label}</b></button>`;
+  const input = (key, label, unit, attrs = '') =>
+    `<label class="calc-field"><span>${label}</span><span class="calc-input"><input type="number" inputmode="decimal" data-profile="${key}" value="${esc(p[key])}" ${attrs}><small>${unit}</small></span></label>`;
+
+  return `<section class="stats">
+    <h2 class="screen-title">Stats</h2>
+
+    <div class="group calc">
+      <h3>Daily calorie burn</h3>
+      <div id="calc-result" class="calc-result">${calcResult()}</div>
+
+      <div class="seg calc-seg">${seg('sex', 'male', 'Male')}${seg('sex', 'female', 'Female')}</div>
+      <div class="calc-grid">
+        ${input('age', 'Age', 'yrs', 'min="13" max="100"')}
+        ${imperial
+          ? `${input('weightLb', 'Weight', 'lb')}${input('heightFt', 'Height', 'ft', 'min="3" max="8"')}${input('heightIn', '&nbsp;', 'in', 'min="0" max="11"')}`
+          : `${input('weightKg', 'Weight', 'kg')}${input('heightCm', 'Height', 'cm')}`}
+      </div>
+
+      <label class="calc-label" for="calc-activity">Activity level</label>
+      <select id="calc-activity" class="calc-select" data-profile="activity">
+        ${K.ACTIVITY.map((a) => `<option value="${a.id}" ${p.activity === a.id ? 'selected' : ''}>${a.label} (${a.note})</option>`).join('')}
+      </select>
+
+      <label class="calc-label" for="calc-goal">Goal</label>
+      <select id="calc-goal" class="calc-select" data-profile="goal">
+        ${K.GOALS.map((g) => `<option value="${g.id}" ${p.goal === g.id ? 'selected' : ''}>${g.label}</option>`).join('')}
+      </select>
+
+      <div class="calc-units">
+        <span class="muted">Units</span>
+        <div class="seg">${seg('units', 'imperial', 'lb / ft')}${seg('units', 'metric', 'kg / cm')}</div>
+      </div>
+      <p class="muted fine">Estimate using the Mifflin-St Jeor equation. Not medical advice.</p>
+    </div>
+
+    <p class="muted center">Streaks and totals arrive in Stage 2.</p>
+  </section>`;
+}
+
+function calcResult() {
+  const est = K.estimate(state.profile);
+  if (!est) return '<p class="muted calc-empty">Enter your age, weight and height to see your daily burn.</p>';
+  const fmt = (n) => n.toLocaleString();
+  return `
+    <div class="calc-big"><b>${fmt(est.tdee)}</b><span>calories burned / day</span></div>
+    <div class="calc-row"><span>Resting (BMR)</span><b>${fmt(est.bmr)}</b></div>
+    <div class="calc-row target"><span>Eat to ${est.goal.label.toLowerCase()}</span><b>${fmt(est.target)}</b></div>
+    ${est.floored ? '<p class="fine warn-text">Raised to the safe minimum for your sex.</p>' : ''}`;
+}
+
+function setProfile(patch) {
+  state = { ...state, profile: { ...state.profile, ...patch } };
+  save();
+  const el = screen.querySelector('#calc-result');
+  if (el) el.innerHTML = calcResult();
+}
+
 function installRow() {
   if (isInstalled()) return '';
   if (installPrompt) {
@@ -503,6 +572,13 @@ const actions = {
     if (state.attempt && !confirm('This ends your current run and starts a new one. Continue?')) return;
     startRun(v);
   },
+  profile(el) {
+    const { key, v } = el.dataset;
+    if (key === 'units') state = { ...state, profile: K.convertUnits(state.profile, v) };
+    else state = { ...state, profile: { ...state.profile, [key]: v } };
+    save();
+    render();
+  },
   async install() {
     if (!installPrompt) return;
     installPrompt.prompt();
@@ -591,6 +667,8 @@ addEventListener('appinstalled', () => {
 
 // Typing in the reading fields updates the log without rebuilding the screen.
 screen.addEventListener('input', (e) => {
+  const key = e.target.dataset.profile;
+  if (key) return setProfile({ [key]: e.target.value });
   const f = e.target.dataset.field;
   if (f === 'title') updateDay(viewKey, (d) => { d.reading.title = e.target.value; }, { rerender: false });
   if (f === 'pages') {

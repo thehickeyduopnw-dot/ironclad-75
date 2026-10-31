@@ -323,6 +323,34 @@ select {
 .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding-bottom: 12px; }
 .btn-grid .btn-secondary { width: 100%; }
 
+/* ---- Calorie calculator ------------------------------------------------- */
+
+.calc { padding-bottom: 14px; }
+.calc-result { margin-bottom: 14px; }
+.calc-empty { margin: 4px 0 8px; }
+.calc-big { display: flex; flex-direction: column; margin: 4px 0 10px; }
+.calc-big b { font-size: 56px; line-height: 1; font-weight: 900; letter-spacing: -0.03em; color: var(--accent-text); font-variant-numeric: tabular-nums; }
+.calc-big span { font-weight: 700; color: var(--muted); }
+.calc-row { display: flex; justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--line); font-weight: 600; }
+.calc-row b { font-size: 20px; font-variant-numeric: tabular-nums; }
+.calc-row.target { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 12px; padding: 12px 14px; margin-top: 6px; }
+.calc-seg { margin: 0 0 12px; }
+.calc-seg .seg-btn, .calc-units .seg-btn { align-items: center; padding: 10px; }
+.calc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.calc-field { min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 14px; font-weight: 700; color: var(--muted); }
+.calc-input { display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 0 14px; border-radius: 14px; background: var(--surface-2); border: 2px solid transparent; }
+.calc-input:focus-within { border-color: var(--text); }
+.calc-input input { flex: 1; width: 100%; min-width: 0; border: 0; background: transparent; font-size: 22px; font-weight: 800; color: var(--text); -moz-appearance: textfield; }
+.calc-input input:focus { outline: none; }
+.calc-input input::-webkit-inner-spin-button, .calc-input input::-webkit-outer-spin-button { -webkit-appearance: none; }
+.calc-input small { font-size: 15px; }
+.calc-label { display: block; margin: 14px 0 6px; font-size: 14px; font-weight: 700; color: var(--muted); }
+.calc-select { width: 100%; min-height: 52px; font-size: 16px; }
+.calc-units { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+.calc-units .seg { margin: 0; flex: 1; max-width: 240px; }
+.fine { font-size: 13px; margin: 12px 0 0; }
+.warn-text { color: var(--warn); font-weight: 700; }
+
 /* ---- Bottom nav: within thumb reach ------------------------------------- */
 
 .nav {
