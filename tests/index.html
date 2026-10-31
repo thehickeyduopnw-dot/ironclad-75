@@ -1,0 +1,128 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Ironclad 75 rule tests</title>
+<style>body{font:15px/1.5 system-ui;margin:20px} .pass{color:green} .fail{color:#c00;font-weight:bold}</style>
+<h1>Rule tests</h1>
+<pre id="out"></pre>
+<script src="../sw.js"></script><!-- syntax check only -->
+<script type="module">
+// Open http://localhost:8080/tests/ to run. Covers the day counter and reset rules.
+import * as C from '../js/challenge.js';
+
+const out = document.getElementById('out');
+let failed = 0;
+function test(name, fn) {
+  try { fn(); out.innerHTML += `<span class="pass">✓ ${name}</span>\n`; }
+  catch (e) { failed++; out.innerHTML += `<span class="fail">✗ ${name}: ${e.message}</span>\n`; }
+}
+function eq(a, b) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); }
+
+const at = (key, hour = 12) => { const d = C.parseKey(key); d.setHours(hour); return d; };
+function fullDay() {
+  return { workout1: { done: true, outdoor: true }, workout2: { done: true, outdoor: false }, diet: true, alcohol: true, water: 128, reading: { title: 'Book', pages: 10 }, photo: true };
+}
+function started(startKey) {
+  return { ...C.defaultState(), attempt: C.newAttempt(startKey) };
+}
+
+test('date math crosses months and DST', () => {
+  eq(C.addDays('2026-10-31', 1), '2026-11-01');
+  eq(C.daysBetween('2026-10-31', '2026-11-02'), 2);
+  eq(C.daysBetween('2026-03-07', '2026-03-09'), 2); // US DST start
+  eq(C.dayNumber('2026-10-01', '2026-10-23'), 23);
+});
+
+test('empty day has all 7 tasks missing', () => {
+  eq(C.missingTasks(undefined).length, 7);
+});
+
+test('full day is complete', () => {
+  eq(C.isDayComplete(fullDay()), true);
+});
+
+test('two indoor workouts are not enough', () => {
+  const d = fullDay(); d.workout1.outdoor = false;
+  eq(C.missingTasks(d), ['Outdoor workout']);
+});
+
+test('outdoor flag on an unfinished workout does not count', () => {
+  const d = fullDay(); d.workout1 = { done: false, outdoor: true };
+  eq(C.taskState(d).outdoor, false);
+});
+
+test('water needs 128 oz, reading needs a title and 10 pages', () => {
+  const d = fullDay(); d.water = 112;
+  eq(C.missingTasks(d), ['Water']);
+  const r = fullDay(); r.reading = { title: '  ', pages: 30 };
+  eq(C.missingTasks(r), ['Reading']);
+});
+
+test('nothing is evaluated on day 1 itself', () => {
+  const s = started('2026-10-31');
+  const { event } = C.evaluate(s, at('2026-10-31', 23));
+  eq(event, null);
+});
+
+test('grace window keeps yesterday open until 3 AM', () => {
+  const s = started('2026-10-31');
+  eq(C.evaluate(s, at('2026-11-01', 2)).event, null);
+  eq(C.evaluate(s, at('2026-11-01', 3)).event?.type, 'reset');
+});
+
+test('strict mode (grace 0) resets right after midnight', () => {
+  const s = started('2026-10-31'); s.settings.graceHour = 0;
+  eq(C.evaluate(s, at('2026-11-01', 0)).event?.type, 'reset');
+});
+
+test('missed day resets to Day 1 today and records history', () => {
+  const s = started('2026-10-01');
+  for (let k = '2026-10-01'; k < '2026-10-23'; k = C.addDays(k, 1)) s.days[k] = fullDay();
+  const { state, event } = C.evaluate(s, at('2026-10-25', 9));
+  eq(event.failedDay, 23);
+  eq(event.daysCompleted, 22);
+  eq(state.attempt.startDate, '2026-10-25');
+  eq(state.attempts.length, 1);
+  eq(state.attempts[0].result, 'reset');
+  eq(state.pendingEvent.type, 'reset');
+});
+
+test('complete days advance evaluatedThrough without an event', () => {
+  const s = started('2026-10-01');
+  s.days['2026-10-01'] = fullDay();
+  const { state, event } = C.evaluate(s, at('2026-10-02', 12));
+  eq(event, null);
+  eq(state.attempt.evaluatedThrough, '2026-10-01');
+  eq(C.evaluate(state, at('2026-10-02', 13)).state === state, true);
+});
+
+test('finishing day 75 completes the challenge', () => {
+  const s = started('2026-01-01');
+  for (let i = 0; i < 75; i++) s.days[C.addDays('2026-01-01', i)] = fullDay();
+  const { state, event } = C.evaluate(s, at(C.addDays('2026-01-01', 76), 12));
+  eq(event.type, 'won');
+  eq(state.attempt.status, 'completed');
+  eq(state.attempts[0].daysCompleted, 75);
+});
+
+test('future start date never resets', () => {
+  const s = started('2026-11-05');
+  eq(C.evaluate(s, at('2026-11-01', 12)).event, null);
+});
+
+test('restart with a past date marks earlier days as done off-app', () => {
+  const s = C.restart(C.defaultState(), '2026-10-28', at('2026-10-31'));
+  eq(s.attempt.startDate, '2026-10-28');
+  eq(C.evaluate(s, at('2026-10-31', 12)).event, null);
+  eq(C.evaluate(s, at('2026-11-01', 12)).event?.failedDay, 4); // today (day 4) still needs doing
+});
+
+test('restart records the abandoned run', () => {
+  const s = started('2026-10-20');
+  const r = C.restart(s, '2026-10-31', at('2026-10-31'));
+  eq(r.attempts[0].result, 'restarted');
+  eq(r.attempts[0].daysCompleted, 11);
+});
+
+out.innerHTML += failed ? `\n<span class="fail">${failed} FAILED</span>` : '\n<span class="pass">ALL PASSED</span>';
+document.title = failed ? 'FAILED' : 'PASSED';
+</script>
