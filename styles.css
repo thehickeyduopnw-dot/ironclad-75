@@ -323,6 +323,70 @@ select {
 .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding-bottom: 12px; }
 .btn-grid .btn-secondary { width: 100%; }
 
+/* ---- Calendar ------------------------------------------------------------- */
+
+.cal-top { display: flex; align-items: baseline; justify-content: space-between; }
+.cal-count { font-size: 18px; font-weight: 700; color: var(--muted); }
+.cal-count b { font-size: 30px; font-weight: 900; color: var(--text); }
+.cal-run { margin-bottom: 14px; }
+.cal-week, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.cal-week { margin-bottom: 6px; text-align: center; font-size: 12px; font-weight: 800; color: var(--muted); }
+.cal-cell {
+  position: relative; aspect-ratio: 1; border-radius: 12px; overflow: hidden;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: var(--surface); color: var(--muted); border: 2px solid transparent;
+}
+.cal-cell b { font-size: 17px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.cal-cell small { position: absolute; top: 3px; font-size: 9px; white-space: nowrap; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }
+.cal-cell i { position: absolute; left: 0; bottom: 0; height: 4px; width: calc(var(--p) * 100%); background: var(--accent); }
+.cal-cell.done { background: var(--accent); color: var(--accent-ink); }
+.cal-cell.today { color: var(--text); border-color: var(--text); }
+.cal-cell.open { color: var(--text); border-color: var(--warn); }
+.cal-cell.missed { background: var(--danger); color: #fff; }
+.cal-cell.upcoming { background: transparent; border-color: var(--line); }
+.cal-cell.none { background: transparent; opacity: 0.35; }
+.cal-cell.sel { outline: 3px solid var(--text); outline-offset: 2px; }
+
+.cal-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 14px 2px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.cal-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.cal-legend i { width: 14px; height: 14px; border-radius: 4px; border: 2px solid transparent; }
+.cal-legend i.done { background: var(--accent); }
+.cal-legend i.today { border-color: var(--text); }
+.cal-legend i.missed { background: var(--danger); }
+.cal-legend i.upcoming { border-color: var(--line); }
+
+.cal-detail { background: var(--surface); border-radius: var(--radius); padding: 16px; scroll-margin-bottom: calc(var(--nav-h) + var(--safe-b) + 16px); }
+.cal-detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.cal-detail-head h3 { margin: 2px 0 0; font-size: 20px; }
+.cal-detail-body { display: flex; gap: 12px; align-items: flex-start; }
+.cal-tasks { flex: 1; list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.cal-tasks li { display: flex; align-items: center; gap: 10px; font-weight: 600; color: var(--muted); }
+.cal-tasks li.on { color: var(--text); }
+.cal-tasks .mark { width: 22px; height: 22px; border-radius: 50%; flex: none; display: grid; place-items: center; font-size: 12px; font-weight: 900; background: var(--surface-2); }
+.cal-tasks li.on .mark { background: var(--accent); color: var(--accent-ink); }
+.cal-tasks small { margin-left: auto; color: var(--muted); font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+.cal-photo { width: 96px; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 12px; background: var(--surface-2); }
+.btn-secondary.wide { width: 100%; margin-top: 12px; }
+.tag.done { background: var(--accent); color: var(--accent-ink); }
+.tag.missed { background: var(--danger); color: #fff; }
+.tag.open { color: var(--warn); }
+
+/* ---- Stats tiles --------------------------------------------------------- */
+
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+.tile { background: var(--surface); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; }
+.tile b { font-size: 44px; line-height: 1; font-weight: 900; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.tile span { margin-top: 6px; font-size: 14px; font-weight: 700; color: var(--muted); }
+.tile.hot { background: var(--accent); color: var(--accent-ink); }
+.tile.hot span { color: inherit; opacity: 0.8; }
+.totals { padding-bottom: 10px; }
+.total-row { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; font-weight: 600; }
+.total-row b { font-variant-numeric: tabular-nums; text-align: right; }
+.causes { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 10px; }
+.causes li { display: grid; grid-template-columns: 110px 1fr auto; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; }
+.causes .bar { height: 10px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
+.causes .bar i { display: block; height: 100%; background: var(--danger); border-radius: inherit; }
+
 /* ---- Calorie calculator ------------------------------------------------- */
 
 .calc { padding-bottom: 14px; }

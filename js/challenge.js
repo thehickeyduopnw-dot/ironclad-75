@@ -213,3 +213,66 @@ export function restart(state, startKey, now) {
   }
   return { ...state, attempts, days, attempt: newAttempt(startKey), pendingEvent: null };
 }
+
+// ---- Calendar and stats -------------------------------------------------
+
+// Status of one date within a run, for the calendar grid. `run` is the current
+// attempt or a finished record from state.attempts (those have a `result`).
+export function runDayStatus(state, run, key, now) {
+  if (key < run.startDate || dayNumber(run.startDate, key) > TOTAL_DAYS) return 'none';
+  if (run.result) {
+    if (key < run.endDate) return 'done';
+    if (key === run.endDate) return run.result === 'reset' ? 'missed' : run.result === 'completed' ? 'done' : 'none';
+    return 'none';
+  }
+  if (run.status === 'completed') return 'done';
+  const today = dateKey(now);
+  if (key > today) return 'upcoming';
+  if (isDayComplete(state.days[key])) return 'done';
+  if (key === today) return 'today';
+  return openKeys(now, state.settings.graceHour).includes(key) ? 'open' : 'missed';
+}
+
+export function computeStats(state, now) {
+  const today = dateKey(now);
+  const a = state.attempt;
+  const active = a && a.status === 'active';
+
+  let current = 0;
+  if (a?.status === 'completed') current = TOTAL_DAYS;
+  else if (active) {
+    for (let k = a.startDate; k <= today; k = addDays(k, 1)) {
+      if (isDayComplete(state.days[k])) current++;
+    }
+  }
+
+  const totals = (fromKey) => {
+    let waterOz = 0, pages = 0;
+    const books = new Set();
+    for (const [k, d] of Object.entries(state.days)) {
+      if (fromKey && (k < fromKey || k > today)) continue;
+      waterOz += d.water || 0;
+      pages += d.reading?.pages || 0;
+      const t = d.reading?.title?.trim().toLowerCase();
+      if (t && (d.reading.pages || 0) > 0) books.add(t);
+    }
+    return { waterOz, pages, books: books.size };
+  };
+
+  const causes = {};
+  for (const r of state.attempts) {
+    if (r.result !== 'reset') continue;
+    for (const m of r.missing) causes[m] = (causes[m] || 0) + 1;
+  }
+
+  return {
+    currentStreak: current,
+    longestStreak: Math.max(current, 0, ...state.attempts.map((r) => r.daysCompleted)),
+    attempts: state.attempts.length + (active ? 1 : 0),
+    resets: state.attempts.filter((r) => r.result === 'reset').length,
+    daysCompleted: state.attempts.reduce((n, r) => n + r.daysCompleted, 0) + (active ? current : 0),
+    run: a && a.startDate <= today ? totals(a.startDate) : { waterOz: 0, pages: 0, books: 0 },
+    allTime: totals(null),
+    resetCauses: Object.entries(causes).sort((x, y) => y[1] - x[1]),
+  };
+}

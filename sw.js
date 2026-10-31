@@ -1,7 +1,7 @@
 // Offline support: the app shell is cached, served from cache, and refreshed in the
 // background, so a new deploy shows up on the next launch. Bump VERSION when the file list changes.
 
-const VERSION = 'ironclad-v3';
+const VERSION = 'ironclad-v4';
 const SHELL = [
   './',
   './index.html',

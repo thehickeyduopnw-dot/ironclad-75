@@ -17,6 +17,8 @@ let viewKey = null; // day shown on Today: today, or yesterday during the grace 
 let openSignature = '';
 let celebrated = false; // confetti plays once per win screen
 let installPrompt = null; // Chrome/Android's deferred install prompt
+let calRun = null; // calendar: null = current run, else index into state.attempts
+let calKey = null; // calendar: selected date
 
 const themeMeta = document.querySelector('meta[name="theme-color"]');
 const prefersLight = matchMedia('(prefers-color-scheme: light)');
@@ -100,10 +102,11 @@ function render() {
     else b.removeAttribute('aria-current');
   }
   renderOverlay();
-  const screens = { today: renderToday, calendar: () => placeholder('Calendar', 2), photos: () => placeholder('Photos', 3), stats: renderStats, settings: renderSettings };
+  const screens = { today: renderToday, calendar: renderCalendar, photos: () => placeholder('Photos', 3), stats: renderStats, settings: renderSettings };
   screen.innerHTML = screens[tab]();
   screen.dataset.screen = tab;
-  if (tab === 'today') loadThumb();
+  if (tab === 'today') patchToday();
+  loadPhotos();
 }
 
 function placeholder(name, stage) {
@@ -242,7 +245,7 @@ function taskCards(day) {
     <div class="card photo ${s.photo ? 'done' : ''}" data-task="photo">
       <label class="card-main photo-pick">
         <input class="visually-hidden" type="file" accept="image/*" data-field="photo">
-        <span class="thumb-wrap">${day.photo ? '<img class="thumb" alt="Today\'s progress photo">' : '<svg class="cam" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>'}</span>
+        <span class="thumb-wrap">${day.photo ? `<img class="thumb" data-photo-key="${viewKey}" alt="Progress photo">` : '<svg class="cam" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>'}</span>
         <span class="card-text"><span class="card-title">Progress photo</span><span class="card-sub">${day.photo ? 'Tap to retake' : 'Tap to take or choose'}</span></span>${CHECK}
       </label>
     </div>`;
@@ -286,17 +289,17 @@ function patchToday() {
   }
 }
 
-async function loadThumb() {
-  patchToday();
-  const img = screen.querySelector('.thumb');
-  if (!img || !viewKey) return;
-  const key = viewKey;
-  if (!photoUrls.has(key)) {
-    const rec = await store.getPhoto(key).catch(() => null);
-    if (!rec) return;
-    photoUrls.set(key, URL.createObjectURL(rec.blob));
+// Fill every <img data-photo-key> on screen from IndexedDB.
+async function loadPhotos() {
+  for (const img of screen.querySelectorAll('img[data-photo-key]')) {
+    const key = img.dataset.photoKey;
+    if (!photoUrls.has(key)) {
+      const rec = await store.getPhoto(key).catch(() => null);
+      if (!rec) { img.remove(); continue; }
+      photoUrls.set(key, URL.createObjectURL(rec.blob));
+    }
+    img.src = photoUrls.get(key);
   }
-  if (key === viewKey) img.src = photoUrls.get(key);
 }
 
 function onboarding() {
@@ -400,6 +403,132 @@ function renderSettings() {
   </section>`;
 }
 
+// ---- Calendar ----------------------------------------------------------------
+
+const STATUS_LABEL = { done: 'Complete', today: 'In progress', open: 'Still open', missed: 'Missed', upcoming: 'Upcoming', none: 'Not reached' };
+
+function renderCalendar() {
+  const runs = state.attempts;
+  if (!state.attempt && !runs.length) {
+    return `<section class="empty"><p class="eyebrow">Calendar</p><h2>No run yet</h2><p class="muted">Start your challenge on the Today tab.</p></section>`;
+  }
+  if (calRun != null && !runs[calRun]) calRun = null;
+  if (calRun == null && !state.attempt) calRun = runs.length - 1;
+  const run = calRun == null ? state.attempt : runs[calRun];
+  const now = clock.now();
+  const today = C.dateKey(now);
+  const end = C.addDays(run.startDate, C.TOTAL_DAYS - 1);
+  if (!calKey || calKey < run.startDate || calKey > end) {
+    calKey = run.result ? run.endDate : today >= run.startDate && today <= end ? today : run.startDate;
+  }
+
+  // Pad the first week so columns line up with weekdays.
+  const lead = C.parseKey(run.startDate).getDay();
+  let cells = '<span class="cal-pad"></span>'.repeat(lead);
+  let done = 0;
+  for (let i = 0; i < C.TOTAL_DAYS; i++) {
+    const key = C.addDays(run.startDate, i);
+    const status = C.runDayStatus(state, run, key, now);
+    if (status === 'done') done++;
+    const d = C.parseKey(key);
+    const month = i === 0 || d.getDate() === 1 ? `<small>${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</small>` : '';
+    const progress = status === 'today' || status === 'open' ? `<i style="--p:${C.doneCount(state.days[key]) / C.TASKS.length}"></i>` : '';
+    cells += `<button class="cal-cell ${status} ${key === calKey ? 'sel' : ''}" data-action="cal-day" data-key="${key}"
+      aria-label="Day ${i + 1}, ${fmtDate(key)}: ${STATUS_LABEL[status]}">${month}<b>${i + 1}</b>${progress}</button>`;
+  }
+
+  const options = [
+    ...(state.attempt ? [`<option value="" ${calRun == null ? 'selected' : ''}>Current · Attempt #${runs.length + 1}</option>`] : []),
+    ...runs.map((r, i) => `<option value="${i}" ${calRun === i ? 'selected' : ''}>#${i + 1} · ${fmtDate(r.startDate, { month: 'short', day: 'numeric' })} – ${fmtDate(r.endDate, { month: 'short', day: 'numeric' })} · ${r.result}</option>`).reverse(),
+  ].join('');
+
+  return `<section class="calendar">
+    <div class="cal-top">
+      <h2 class="screen-title">Calendar</h2>
+      <span class="cal-count"><b>${done}</b>/${C.TOTAL_DAYS}</span>
+    </div>
+    ${runs.length ? `<select id="cal-run" class="calc-select cal-run" aria-label="Choose attempt">${options}</select>` : ''}
+    <div class="cal-week" aria-hidden="true">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w) => `<span>${w}</span>`).join('')}</div>
+    <div class="cal-grid">${cells}</div>
+    <div class="cal-legend">
+      <span><i class="done"></i>Complete</span><span><i class="today"></i>Today</span>
+      <span><i class="missed"></i>Missed</span><span><i class="upcoming"></i>Upcoming</span>
+    </div>
+    ${dayDetail(run, calKey, now)}
+  </section>`;
+}
+
+function dayDetail(run, key, now) {
+  const status = C.runDayStatus(state, run, key, now);
+  const n = C.dayNumber(run.startDate, key);
+  const raw = state.days[key];
+  const head = `<div class="cal-detail-head">
+      <div><p class="eyebrow">Day ${n}</p><h3>${fmtDate(key, { weekday: 'long', month: 'long', day: 'numeric' })}</h3></div>
+      <span class="tag ${status}">${STATUS_LABEL[status]}</span>
+    </div>`;
+
+  if (status === 'upcoming' || status === 'none' || (!raw && status !== 'missed')) {
+    return `<div class="cal-detail">${head}<p class="muted">${status === 'none' ? 'No log for this day.' : 'Nothing logged yet.'}</p></div>`;
+  }
+  if (raw?.manual) return `<div class="cal-detail">${head}<p class="muted">Completed off-app.</p></div>`;
+
+  const d = C.normalizeDay(raw);
+  const s = C.taskState(d);
+  const row = (ok, label, detail = '') =>
+    `<li class="${ok ? 'on' : ''}"><span class="mark" aria-hidden="true">${ok ? '✓' : '✕'}</span><span>${label}</span><small>${detail}</small></li>`;
+  const outdoorNote = (w) => (d[w].outdoor ? 'Outdoor' : '');
+  const editable = !run.result && C.openKeys(now, state.settings.graceHour).includes(key);
+
+  return `<div class="cal-detail">${head}
+    <div class="cal-detail-body">
+      <ul class="cal-tasks">
+        ${row(s.workout1, 'Workout #1', outdoorNote('workout1'))}
+        ${row(s.workout2, 'Workout #2', outdoorNote('workout2'))}
+        ${row(s.diet, 'Diet')}
+        ${row(s.alcohol, 'No alcohol')}
+        ${row(s.water, 'Water', `${d.water} oz`)}
+        ${row(s.reading, 'Reading', d.reading.pages ? `${d.reading.pages} p${d.reading.title ? ` · ${esc(d.reading.title)}` : ''}` : '')}
+        ${row(s.photo, 'Photo')}
+      </ul>
+      ${d.photo ? `<img class="cal-photo" data-photo-key="${key}" alt="Progress photo, day ${n}">` : ''}
+    </div>
+    ${s.workout1 && s.workout2 && !s.outdoor ? '<p class="warn-text fine">Neither workout was outdoors.</p>' : ''}
+    ${editable ? `<button class="btn-secondary wide" data-action="cal-open" data-key="${key}">Edit in Today</button>` : ''}
+  </div>`;
+}
+
+// ---- Stats ---------------------------------------------------------------------
+
+function statsTiles() {
+  const st = C.computeStats(state, clock.now());
+  const gal = (oz) => (oz / 128).toLocaleString(undefined, { maximumFractionDigits: 1 });
+  const fmt = (n) => n.toLocaleString();
+  const tile = (value, label, cls = '') => `<div class="tile ${cls}"><b>${value}</b><span>${label}</span></div>`;
+  const maxCause = st.resetCauses[0]?.[1] || 1;
+
+  return `
+    <div class="tiles">
+      ${tile(st.currentStreak, 'current streak', 'hot')}
+      ${tile(st.longestStreak, 'longest streak')}
+      ${tile(st.attempts, st.attempts === 1 ? 'attempt' : 'attempts')}
+      ${tile(st.daysCompleted, 'days completed')}
+    </div>
+    <div class="group totals">
+      <h3>Water</h3>
+      <div class="total-row"><span>This run</span><b>${gal(st.run.waterOz)} gal</b></div>
+      <div class="total-row"><span>All time</span><b>${gal(st.allTime.waterOz)} gal</b></div>
+      <h3>Reading</h3>
+      <div class="total-row"><span>This run</span><b>${fmt(st.run.pages)} pages</b></div>
+      <div class="total-row"><span>All time</span><b>${fmt(st.allTime.pages)} pages · ${st.allTime.books} book${st.allTime.books === 1 ? '' : 's'}</b></div>
+    </div>
+    ${st.resetCauses.length ? `<div class="group">
+      <h3>What reset you</h3>
+      <ul class="causes">${st.resetCauses.map(([label, count]) => `
+        <li><span>${esc(label)}</span><span class="bar"><i style="width:${(count / maxCause) * 100}%"></i></span><b>${count}×</b></li>`).join('')}
+      </ul>
+    </div>` : ''}`;
+}
+
 function renderStats() {
   const p = state.profile;
   const imperial = p.units === 'imperial';
@@ -410,6 +539,7 @@ function renderStats() {
 
   return `<section class="stats">
     <h2 class="screen-title">Stats</h2>
+    ${statsTiles()}
 
     <div class="group calc">
       <h3>Daily calorie burn</h3>
@@ -440,7 +570,6 @@ function renderStats() {
       <p class="muted fine">Estimate using the Mifflin-St Jeor equation. Not medical advice.</p>
     </div>
 
-    <p class="muted center">Streaks and totals arrive in Stage 2.</p>
   </section>`;
 }
 
@@ -572,6 +701,15 @@ const actions = {
     if (state.attempt && !confirm('This ends your current run and starts a new one. Continue?')) return;
     startRun(v);
   },
+  'cal-day'(el) {
+    calKey = el.dataset.key;
+    render();
+    screen.querySelector('.cal-detail')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  },
+  'cal-open'(el) {
+    viewKey = el.dataset.key;
+    goTab('today');
+  },
   profile(el) {
     const { key, v } = el.dataset;
     if (key === 'units') state = { ...state, profile: K.convertUnits(state.profile, v) };
@@ -690,6 +828,12 @@ screen.addEventListener('change', async (e) => {
     } catch (err) {
       toast(err.message || 'Could not save the photo.');
     }
+    return;
+  }
+  if (t.id === 'cal-run') {
+    calRun = t.value === '' ? null : Number(t.value);
+    calKey = null;
+    render();
     return;
   }
   const setting = t.dataset.setting;

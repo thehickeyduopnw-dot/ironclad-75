@@ -124,6 +124,48 @@ test('restart records the abandoned run', () => {
   eq(r.attempts[0].daysCompleted, 11);
 });
 
+test('calendar statuses for the current run', () => {
+  const s = started('2026-10-29');
+  s.days['2026-10-29'] = fullDay();
+  s.days['2026-10-30'] = fullDay();
+  const now = at('2026-10-31', 10);
+  eq(C.runDayStatus(s, s.attempt, '2026-10-29', now), 'done');
+  eq(C.runDayStatus(s, s.attempt, '2026-10-31', now), 'today');
+  eq(C.runDayStatus(s, s.attempt, '2026-11-01', now), 'upcoming');
+  eq(C.runDayStatus(s, s.attempt, '2026-10-28', now), 'none');
+  eq(C.runDayStatus(s, s.attempt, '2026-10-30', at('2026-10-31', 1)), 'done');
+});
+
+test('calendar statuses for a reset run', () => {
+  const r = { startDate: '2026-10-01', endDate: '2026-10-05', result: 'reset', daysCompleted: 4, missing: ['Water'] };
+  const s = C.defaultState();
+  eq(C.runDayStatus(s, r, '2026-10-04', at('2026-10-31')), 'done');
+  eq(C.runDayStatus(s, r, '2026-10-05', at('2026-10-31')), 'missed');
+  eq(C.runDayStatus(s, r, '2026-10-06', at('2026-10-31')), 'none');
+});
+
+test('stats: streaks, attempts, totals, reset causes', () => {
+  const s = started('2026-10-29');
+  s.attempts = [
+    { startDate: '2026-09-01', endDate: '2026-09-11', result: 'reset', daysCompleted: 10, missing: ['Water', 'Reading'] },
+    { startDate: '2026-09-20', endDate: '2026-09-23', result: 'reset', daysCompleted: 3, missing: ['Water'] },
+  ];
+  s.days['2026-10-29'] = fullDay();
+  s.days['2026-10-30'] = fullDay();
+  s.days['2026-10-31'] = { ...fullDay(), water: 64, reading: { title: 'book', pages: 5 } };
+  s.days['2026-09-05'] = { ...fullDay(), reading: { title: 'Other', pages: 20 } };
+  const st = C.computeStats(s, at('2026-10-31', 15));
+  eq(st.currentStreak, 2);
+  eq(st.longestStreak, 10);
+  eq(st.attempts, 3);
+  eq(st.daysCompleted, 15);
+  eq(st.run.waterOz, 128 * 2 + 64);
+  eq(st.run.pages, 25);
+  eq(st.allTime.pages, 45);
+  eq(st.allTime.books, 2);
+  eq(st.resetCauses, [['Water', 2], ['Reading', 1]]);
+});
+
 const base = { ...K.defaultProfile(), units: 'metric', age: '30', heightCm: '180', weightKg: '80' };
 
 test('Mifflin-St Jeor resting rate (male and female)', () => {
