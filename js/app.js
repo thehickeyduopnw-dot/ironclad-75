@@ -6,6 +6,8 @@ import * as fx from './feedback.js';
 import * as clock from './clock.js';
 import { prepareImage } from './photo.js';
 import * as K from './calories.js';
+import * as R from './reminders.js';
+import * as B from './backup.js';
 
 const screen = document.getElementById('screen');
 const overlay = document.getElementById('overlay');
@@ -19,6 +21,9 @@ let celebrated = false; // confetti plays once per win screen
 let installPrompt = null; // Chrome/Android's deferred install prompt
 let calRun = null; // calendar: null = current run, else index into state.attempts
 let calKey = null; // calendar: selected date
+let photoList = []; // sorted date keys that have a stored photo
+let cmpA = null; // photos: left side of the comparison
+let cmpB = null; // photos: right side
 
 const themeMeta = document.querySelector('meta[name="theme-color"]');
 const prefersLight = matchMedia('(prefers-color-scheme: light)');
@@ -41,16 +46,19 @@ async function init() {
   }
   state.settings = { ...C.defaultState().settings, ...state.settings };
   state.profile = { ...K.defaultProfile(), ...state.profile };
+  state.reminders = { url: '', token: '', on: false, ...state.reminders };
   applySettings();
+  await refreshPhotoList();
   evaluateNow();
   render();
+  R.syncStatus(state.reminders, reminderStatus());
   store.requestPersistence();
 
   setInterval(() => tick(false), 20000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(true); });
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    navigator.serviceWorker.register('./sw.js', { type: 'module' }).catch(() => {});
   }
 }
 
@@ -75,7 +83,34 @@ function evaluateNow() {
 
 function save() {
   store.saveState(state).catch((err) => toast(`Couldn't save: ${err.message}`));
+  R.syncStatus(state.reminders, reminderStatus());
 }
+
+// What the reminder service needs to know: is today finished?
+function reminderStatus() {
+  const now = clock.now();
+  const today = C.dateKey(now);
+  const a = state.attempt;
+  const active = !!a && a.status === 'active' && a.startDate <= today;
+  const missing = C.missingTasks(state.days[today]);
+  return {
+    date: today,
+    active,
+    complete: active && missing.length === 0,
+    left: active ? missing.length : 0,
+    day: active ? C.dayNumber(a.startDate, today) : 0,
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  };
+}
+
+async function refreshPhotoList() {
+  photoList = (await store.photoKeys().catch(() => [])).sort();
+}
+
+const fmtTime = (hhmm) => {
+  const [h, m] = hhmm.split(':').map(Number);
+  return new Date(2000, 0, 1, h, m).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+};
 
 function applySettings() {
   const { theme, sound } = state.settings;
@@ -102,15 +137,11 @@ function render() {
     else b.removeAttribute('aria-current');
   }
   renderOverlay();
-  const screens = { today: renderToday, calendar: renderCalendar, photos: () => placeholder('Photos', 3), stats: renderStats, settings: renderSettings };
+  const screens = { today: renderToday, calendar: renderCalendar, photos: renderPhotos, stats: renderStats, settings: renderSettings };
   screen.innerHTML = screens[tab]();
   screen.dataset.screen = tab;
   if (tab === 'today') patchToday();
   loadPhotos();
-}
-
-function placeholder(name, stage) {
-  return `<section class="empty"><p class="eyebrow">${name}</p><h2>Coming in Stage ${stage}</h2><p class="muted">Today and Settings work now.</p></section>`;
 }
 
 function attemptNumber() {
@@ -151,8 +182,18 @@ function renderToday() {
       <div class="run-bar" aria-hidden="true"><span id="run-fill"></span></div>
     </header>
     ${yesterday ? graceSwitch(a, today, yesterday) : ''}
+    ${eveningBanner(now, today)}
     <div id="status" class="status"></div>
     <section class="tasks">${taskCards(day)}</section>`;
+}
+
+// In-app reminder: works even without the push service.
+function eveningBanner(now, today) {
+  if (viewKey !== today) return '';
+  const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const left = C.missingTasks(state.days[today]).length;
+  if (!left || hhmm < state.settings.reminderTime) return '';
+  return `<div class="banner" role="status"><b>${left} task${left === 1 ? '' : 's'} left</b> · it's after ${fmtTime(state.settings.reminderTime)}, finish before midnight.</div>`;
 }
 
 // During the grace window both yesterday and today can be edited.
@@ -397,9 +438,10 @@ function renderSettings() {
         : '<p class="muted">No past attempts yet.</p>'}
     </div>
 
+    ${remindersGroup()}
+    ${backupGroup()}
     ${a ? '<div class="group"><button class="btn-danger" data-action="restart">Restart challenge</button></div>' : ''}
     ${clock.isDebug ? debugPanel() : ''}
-    <p class="muted center">Reminders arrive in Stage 4, backup in Stage 5.</p>
   </section>`;
 }
 
@@ -591,6 +633,120 @@ function setProfile(patch) {
   if (el) el.innerHTML = calcResult();
 }
 
+// ---- Photos --------------------------------------------------------------------
+
+function photoLabel(key) {
+  const r = C.runForKey(state, key);
+  return r ? `Day ${r.day}` : fmtDate(key, { month: 'short', day: 'numeric' });
+}
+
+function renderPhotos() {
+  if (!photoList.length) {
+    return `<section class="empty"><p class="eyebrow">Photos</p><h2>No photos yet</h2><p class="muted">Take your first progress photo on the Today tab.</p></section>`;
+  }
+  // Default comparison: Day 1 of this run vs the latest photo.
+  const cur = state.attempt;
+  if (!photoList.includes(cmpA)) cmpA = (cur && photoList.find((k) => k >= cur.startDate)) || photoList[0];
+  if (!photoList.includes(cmpB)) cmpB = photoList[photoList.length - 1];
+
+  const options = (sel) => [...photoList].reverse().map((k) =>
+    `<option value="${k}" ${k === sel ? 'selected' : ''}>${photoLabel(k)} · ${fmtDate(k, { month: 'short', day: 'numeric' })}</option>`).join('');
+  const pane = (side, key) => `
+    <figure class="cmp">
+      <button class="cmp-img" data-action="lightbox" data-key="${key}" aria-label="View ${photoLabel(key)} full screen">
+        <img data-photo-key="${key}" alt="${photoLabel(key)} progress photo"><span class="cmp-tag">${photoLabel(key)}</span>
+      </button>
+      <select class="cmp-select" data-cmp="${side}" aria-label="${side === 'a' ? 'Left' : 'Right'} photo">${options(key)}</select>
+    </figure>`;
+
+  // Gallery grouped by attempt, newest first.
+  const groups = new Map();
+  for (const k of [...photoList].reverse()) {
+    const r = C.runForKey(state, k);
+    const label = r ? `Attempt #${r.number}${r.run === state.attempt && r.run.status === 'active' ? ' (current)' : ''}` : 'Other';
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(k);
+  }
+  const gallery = [...groups].map(([label, keys]) => `
+    <h3 class="g-head">${label}</h3>
+    <div class="gallery">${keys.map((k) => `
+      <button class="g-item ${k === cmpB ? 'sel' : ''}" data-action="cmp-pick" data-key="${k}" aria-label="Compare ${photoLabel(k)}">
+        <img data-photo-key="${k}" alt="" loading="lazy"><span>${photoLabel(k).replace('Day ', '')}</span>
+      </button>`).join('')}
+    </div>`).join('');
+
+  return `<section class="photos">
+    <div class="cal-top"><h2 class="screen-title">Photos</h2><span class="cal-count"><b>${photoList.length}</b> total</span></div>
+    <div class="compare">${pane('a', cmpA)}${pane('b', cmpB)}</div>
+    <p class="muted fine center">Tap a photo below to compare it with ${photoLabel(cmpA)}. Tap a big photo to see it full screen.</p>
+    ${gallery}
+  </section>`;
+}
+
+function openLightbox(key) {
+  const lb = document.createElement('div');
+  lb.className = 'lightbox';
+  lb.innerHTML = `<img src="${photoUrls.get(key) || ''}" alt="${photoLabel(key)} progress photo">
+    <p>${photoLabel(key)} · ${fmtDate(key, { weekday: 'short', month: 'long', day: 'numeric' })}</p>`;
+  lb.addEventListener('click', () => lb.remove());
+  document.body.appendChild(lb);
+}
+
+// ---- Reminders and backup (Settings) -------------------------------------------
+
+const README_URL = 'https://github.com/thehickeyduopnw-dot/ironclad-75#reminders';
+
+function remindersGroup() {
+  const r = state.reminders;
+  const time = `<div class="setting">
+      <label for="set-remind">Reminder time</label>
+      <input type="time" id="set-remind" class="time-input" data-setting="reminderTime" value="${state.settings.reminderTime}">
+    </div>`;
+  let body;
+  if (!R.supported()) {
+    body = `<p class="muted pad-y">This browser can't receive push notifications. Today shows a reminder banner after this time instead.</p>`;
+  } else if (r.on) {
+    body = `<p class="pad-y"><b class="accent">On.</b> <span class="muted">You'll get a notification at ${fmtTime(state.settings.reminderTime)} if anything is left.</span></p>
+      <div class="row pad-b"><button class="btn-secondary grow" data-action="rem-test">Send test</button><button class="btn-secondary grow" data-action="rem-off">Turn off</button></div>`;
+  } else {
+    body = `<div class="setting col">
+        <label for="rem-url">Reminder service address</label>
+        <input id="rem-url" class="field" type="url" inputmode="url" autocomplete="off" placeholder="https://ironclad-reminders.you.workers.dev" value="${esc(r.url)}">
+        <button class="btn-primary" data-action="rem-on">Turn on reminders</button>
+        <small class="muted">Needs a free one-time setup (about 10 minutes): <a href="${README_URL}" target="_blank" rel="noopener">step-by-step guide</a>. Until then, Today shows a banner after this time.</small>
+      </div>`;
+  }
+  return `<div class="group"><h3>Evening reminder</h3>${time}${body}</div>`;
+}
+
+function backupGroup() {
+  const last = state.lastBackupAt ? new Date(state.lastBackupAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'never';
+  return `<div class="group">
+    <h3>Backup</h3>
+    <p class="muted pad-y">Everything lives only on this phone. Export a backup (photos included) every week or so and keep it somewhere safe, like Google Drive.</p>
+    <div class="row pad-b">
+      <button class="btn-secondary grow" data-action="export">Export backup</button>
+      <label class="btn-secondary grow file-btn">Import backup<input class="visually-hidden" type="file" accept="application/json,.json" data-field="import"></label>
+    </div>
+    <p class="muted fine pad-b">Last export: ${last}</p>
+  </div>`;
+}
+
+// Run an async button action with a busy label; errors become a toast.
+async function busy(el, label, fn) {
+  const old = el.textContent;
+  el.disabled = true;
+  el.textContent = label;
+  try {
+    await fn();
+  } catch (err) {
+    toast(err.message || String(err));
+  } finally {
+    el.disabled = false;
+    el.textContent = old;
+  }
+}
+
 function installRow() {
   if (isInstalled()) return '';
   if (installPrompt) {
@@ -700,6 +856,48 @@ const actions = {
     if (!v) return;
     if (state.attempt && !confirm('This ends your current run and starts a new one. Continue?')) return;
     startRun(v);
+  },
+  'cmp-pick'(el) {
+    cmpB = el.dataset.key;
+    render();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  },
+  lightbox(el) {
+    openLightbox(el.dataset.key);
+  },
+  'rem-on'(el) {
+    busy(el, 'Turning on…', async () => {
+      const url = document.getElementById('rem-url').value.trim();
+      const rem = { ...state.reminders, url };
+      const token = await R.enable(rem, state.settings.reminderTime, reminderStatus());
+      state = { ...state, reminders: { url, token, on: true } };
+      save();
+      render();
+      toast('Reminders are on.');
+    });
+  },
+  'rem-off'(el) {
+    busy(el, 'Turning off…', async () => {
+      await R.disable(state.reminders);
+      state = { ...state, reminders: { ...state.reminders, on: false } };
+      save();
+      render();
+    });
+  },
+  'rem-test'(el) {
+    busy(el, 'Sending…', async () => {
+      const { status } = await R.sendTest(state.reminders);
+      toast(status < 300 ? 'Test sent. It should arrive in a few seconds.' : `The push service answered ${status}. Try turning reminders off and on.`);
+    });
+  },
+  export(el) {
+    busy(el, 'Preparing…', async () => {
+      const { photos, bytes } = await B.exportBackup(state);
+      state = { ...state, lastBackupAt: Date.now() };
+      save();
+      render();
+      toast(`Backup saved: ${photos} photo${photos === 1 ? '' : 's'}, ${(bytes / 1048576).toFixed(1)} MB. Check your Downloads.`);
+    });
   },
   'cal-day'(el) {
     calKey = el.dataset.key;
@@ -824,9 +1022,27 @@ screen.addEventListener('change', async (e) => {
       await store.putPhoto(key, blob);
       if (photoUrls.has(key)) URL.revokeObjectURL(photoUrls.get(key));
       photoUrls.set(key, URL.createObjectURL(blob));
+      if (!photoList.includes(key)) photoList = [...photoList, key].sort();
       updateDay(key, (d) => { d.photo = true; });
     } catch (err) {
       toast(err.message || 'Could not save the photo.');
+    }
+    return;
+  }
+  if (t.dataset.field === 'import' && t.files?.[0]) {
+    try {
+      const data = await B.readBackup(t.files[0]);
+      const days = Object.keys(data.state.days).length;
+      const photos = Object.keys(data.photos || {}).length;
+      const when = new Date(data.exportedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+      if (!confirm(`Replace everything on this phone with the backup from ${when}? (${days} logged days, ${photos} photos)`)) return;
+      toast('Restoring…');
+      await B.restoreBackup(data);
+      location.reload();
+    } catch (err) {
+      toast(err.message || 'Could not import that backup.');
+    } finally {
+      t.value = '';
     }
     return;
   }
@@ -836,13 +1052,24 @@ screen.addEventListener('change', async (e) => {
     render();
     return;
   }
+  if (t.dataset.cmp) {
+    if (t.dataset.cmp === 'a') cmpA = t.value;
+    else cmpB = t.value;
+    render();
+    return;
+  }
   const setting = t.dataset.setting;
   if (setting) {
     const value = setting === 'sound' ? t.checked : setting === 'graceHour' ? Number(t.value) : t.value;
+    if (setting === 'reminderTime' && !value) return;
     state = { ...state, settings: { ...state.settings, [setting]: value } };
     save();
     applySettings();
     if (setting === 'graceHour' && evaluateNow()) render();
+    if (setting === 'reminderTime') {
+      if (state.reminders.on) R.updateSettings(state.reminders, { reminderTime: value }).catch((err) => toast(err.message));
+      render();
+    }
   }
 });
 

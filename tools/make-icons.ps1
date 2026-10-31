@@ -34,4 +34,18 @@ Draw-Icon 180 'apple-touch-icon.png' 0.12
 Draw-Icon 192 'icon-192.png' 0.12
 Draw-Icon 512 'icon-512.png' 0.12
 Draw-Icon 512 'icon-maskable-512.png' 0.2   # extra margin so Android's mask doesn't crop it
+# Notification badge: Android shows it as a white silhouette, so draw white on transparent.
+$bmp = [System.Drawing.Bitmap]::new(96, 96)
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.SmoothingMode = 'AntiAlias'
+$g.TextRenderingHint = 'AntiAliasGridFit'
+$g.Clear([System.Drawing.Color]::Transparent)
+$font = [System.Drawing.Font]::new('Arial Black', [single]44, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+$fmt = [System.Drawing.StringFormat]::new()
+$fmt.Alignment = 'Center'
+$fmt.LineAlignment = 'Center'
+$g.DrawString('75', $font, [System.Drawing.Brushes]::White, [System.Drawing.RectangleF]::new(0, -4, 96, 96), $fmt)
+$bmp.Save((Join-Path $out 'badge-96.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+$g.Dispose(); $bmp.Dispose()
+
 Write-Host "Icons written to $out"

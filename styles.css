@@ -387,6 +387,50 @@ select {
 .causes .bar { height: 10px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
 .causes .bar i { display: block; height: 100%; background: var(--danger); border-radius: inherit; }
 
+/* ---- Photos ------------------------------------------------------------------ */
+
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.cmp { margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.cmp-img { position: relative; aspect-ratio: 3 / 4; border-radius: 16px; overflow: hidden; background: var(--surface); }
+.cmp-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cmp-tag {
+  position: absolute; left: 8px; top: 8px; padding: 4px 10px; border-radius: 99px;
+  background: var(--accent); color: var(--accent-ink); font-size: 14px; font-weight: 900;
+}
+.cmp-select { width: 100%; min-height: 44px; font-size: 14px; }
+.g-head { font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 22px 0 8px; }
+.gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.g-item { position: relative; aspect-ratio: 3 / 4; border-radius: 12px; overflow: hidden; background: var(--surface); border: 3px solid transparent; }
+.g-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.g-item span {
+  position: absolute; left: 6px; bottom: 6px; min-width: 28px; padding: 2px 7px; border-radius: 99px;
+  background: rgba(0, 0, 0, 0.7); color: #fff; font-size: 13px; font-weight: 900;
+}
+.g-item.sel { border-color: var(--accent); }
+
+.lightbox {
+  position: fixed; inset: 0; z-index: 80; background: #000;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  padding: calc(var(--safe-t) + 12px) 12px calc(var(--safe-b) + 12px); animation: fade 0.2s;
+}
+.lightbox img { max-width: 100%; max-height: calc(100% - 48px); object-fit: contain; border-radius: 12px; }
+.lightbox p { margin: 0; color: #fff; font-weight: 700; }
+
+/* ---- Reminders, backup ----------------------------------------------------- */
+
+.banner {
+  margin-top: 14px; padding: 12px 14px; border-radius: 14px;
+  background: color-mix(in srgb, var(--warn) 18%, var(--surface)); border: 2px solid var(--warn); font-weight: 600;
+}
+.banner b { color: var(--warn); }
+.pad-y { margin: 10px 0; }
+.pad-b { padding-bottom: 12px; margin: 0; }
+.grow { flex: 1; }
+.file-btn { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-weight: 800; }
+.time-input { min-height: 44px; padding: 0 12px; border-radius: 12px; border: 0; background: var(--surface-2); font-weight: 700; font-size: 17px; }
+.setting.col .btn-primary { margin-top: 2px; }
+.group a { color: var(--accent-text); font-weight: 700; }
+
 /* ---- Calorie calculator ------------------------------------------------- */
 
 .calc { padding-bottom: 14px; }

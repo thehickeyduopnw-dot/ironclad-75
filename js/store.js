@@ -36,6 +36,7 @@ export const getPhoto = (key) => run('photos', 'readonly', (s) => s.get(key));
 export const putPhoto = (key, blob) => run('photos', 'readwrite', (s) => s.put({ blob, date: key, savedAt: Date.now() }, key));
 export const deletePhoto = (key) => run('photos', 'readwrite', (s) => s.delete(key));
 export const photoKeys = () => run('photos', 'readonly', (s) => s.getAllKeys());
+export const clearPhotos = () => run('photos', 'readwrite', (s) => s.clear());
 
 // Ask the browser not to evict our data under storage pressure.
 export function requestPersistence() {

@@ -276,3 +276,17 @@ export function computeStats(state, now) {
     resetCauses: Object.entries(causes).sort((x, y) => y[1] - x[1]),
   };
 }
+
+// Which run a date belongs to: { run, number (attempt #), day (1-75) }, or null.
+export function runForKey(state, key) {
+  const a = state.attempt;
+  if (a && key >= a.startDate && dayNumber(a.startDate, key) <= TOTAL_DAYS) {
+    const number = a.status === 'completed' ? state.attempts.length : state.attempts.length + 1;
+    return { run: a, number, day: dayNumber(a.startDate, key) };
+  }
+  for (let i = state.attempts.length - 1; i >= 0; i--) {
+    const r = state.attempts[i];
+    if (key >= r.startDate && key <= r.endDate) return { run: r, number: i + 1, day: dayNumber(r.startDate, key) };
+  }
+  return null;
+}

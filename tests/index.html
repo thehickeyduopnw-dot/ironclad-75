@@ -4,16 +4,16 @@
 <style>body{font:15px/1.5 system-ui;margin:20px} .pass{color:green} .fail{color:#c00;font-weight:bold}</style>
 <h1>Rule tests</h1>
 <pre id="out"></pre>
-<script src="../sw.js"></script><!-- syntax check only -->
 <script type="module">
 // Open http://localhost:8080/tests/ to run. Covers the day counter and reset rules.
 import * as C from '../js/challenge.js';
 import * as K from '../js/calories.js';
+import worker, { runReminder, localNow } from '../worker/reminders.js';
 
 const out = document.getElementById('out');
 let failed = 0;
-function test(name, fn) {
-  try { fn(); out.innerHTML += `<span class="pass">✓ ${name}</span>\n`; }
+async function test(name, fn) {
+  try { await fn(); out.innerHTML += `<span class="pass">✓ ${name}</span>\n`; }
   catch (e) { failed++; out.innerHTML += `<span class="fail">✗ ${name}: ${e.message}</span>\n`; }
 }
 function eq(a, b) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); }
@@ -200,6 +200,70 @@ test('unit switch converts entered values', () => {
   const imp = K.convertUnits(base, 'imperial');
   eq([imp.heightFt, imp.heightIn, imp.weightLb], ['5', '11', '176']);
   eq(K.convertUnits(imp, 'metric').heightCm, '180');
+});
+
+await test('photos map to their run and day', () => {
+  const s = started('2026-10-20');
+  s.attempts = [{ startDate: '2026-10-01', endDate: '2026-10-10', result: 'reset', daysCompleted: 9, missing: [] }];
+  eq(C.runForKey(s, '2026-10-22').day, 3);
+  eq(C.runForKey(s, '2026-10-22').number, 2);
+  eq(C.runForKey(s, '2026-10-05').number, 1);
+  eq(C.runForKey(s, '2026-10-15'), null);
+});
+
+// ---- Reminder Worker, with a fake KV store and push service ----
+function mockEnv() {
+  const kv = new Map();
+  const sent = [];
+  return {
+    sent,
+    KV: { get: async (k, type) => (kv.has(k) ? (type === 'json' ? JSON.parse(kv.get(k)) : kv.get(k)) : null), put: async (k, v) => { kv.set(k, v); } },
+    FETCH: async (url, init) => { sent.push({ url, init }); return new Response(null, { status: 201 }); },
+  };
+}
+const post = (env, path, body) => worker.fetch(new Request(`https://w.test${path}`, { method: 'POST', body: JSON.stringify(body) }), env).then(async (r) => ({ status: r.status, data: await r.json() }));
+const SUB = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc', keys: { p256dh: 'x', auth: 'y' } };
+const pdt = (h, m, day = 31) => Date.UTC(2026, 9, day, h + 7, m); // Oct 2026 is UTC-7
+
+await test('worker: local time follows the phone time zone', () => {
+  eq(localNow(pdt(20, 5), 'America/Los_Angeles'), { date: '2026-10-31', time: '20:05' });
+});
+
+await test('worker: first phone links, others are refused', async () => {
+  const env = mockEnv();
+  const first = await post(env, '/subscribe', { subscription: SUB, reminderTime: '20:00', tz: 'America/Los_Angeles' });
+  eq(first.status, 200);
+  eq((await post(env, '/subscribe', { subscription: SUB })).status, 403);
+  eq((await post(env, '/status', { token: 'wrong', status: {} })).status, 403);
+  eq((await post(env, '/subscribe', { token: first.data.token, subscription: SUB })).status, 200);
+});
+
+await test('worker: one push after reminder time, skipped when done', async () => {
+  const env = mockEnv();
+  const { data } = await post(env, '/subscribe', { subscription: SUB, reminderTime: '20:00', tz: 'America/Los_Angeles' });
+  await post(env, '/status', { token: data.token, status: { date: '2026-10-31', active: true, complete: false, left: 3 } });
+  eq(await runReminder(env, pdt(19, 55)), 'waiting');
+  eq(await runReminder(env, pdt(20, 5)), 'sent (201)');
+  eq(await runReminder(env, pdt(20, 10)), 'waiting'); // already sent today
+  eq(env.sent.length, 1);
+  await post(env, '/status', { token: data.token, status: { date: '2026-11-01', active: true, complete: true, left: 0 } });
+  eq(await runReminder(env, Date.UTC(2026, 10, 2, 4, 5)), 'day complete'); // Nov 1, 8:05 PM PST
+  await post(env, '/settings', { token: data.token, enabled: false });
+  eq(await runReminder(env, Date.UTC(2026, 10, 3, 4, 5)), 'off');
+});
+
+await test('worker: VAPID signature verifies with the public key', async () => {
+  const env = mockEnv();
+  const { data } = await post(env, '/subscribe', { subscription: SUB, tz: 'UTC' });
+  await post(env, '/test', { token: data.token });
+  const auth = env.sent[0].init.headers.Authorization;
+  const [, jwt, k] = auth.match(/^vapid t=([^,]+), k=(.+)$/);
+  const [h, p, sig] = jwt.split('.');
+  const bytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey('raw', bytes(k), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+  const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, bytes(sig), new TextEncoder().encode(`${h}.${p}`));
+  eq(ok, true);
+  eq(JSON.parse(new TextDecoder().decode(bytes(p))).aud, 'https://fcm.googleapis.com');
 });
 
 out.innerHTML += failed ? `\n<span class="fail">${failed} FAILED</span>` : '\n<span class="pass">ALL PASSED</span>';
