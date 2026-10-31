@@ -47,23 +47,37 @@ export function lastSync() {
 
 // Debounced background sync. Never throws; failures just wait for the next change,
 // the next launch, or the connection coming back.
-export function scheduleSync(cloud, buildPayload, delay = 2500) {
+// `hooks.payload()` builds what to upload; `hooks.apply(changes)` applies Muse's
+// changes to the local log and returns the ids it handled.
+export function scheduleSync(cloud, hooks, delay = 2500) {
   if (!linked(cloud)) return;
   clearTimeout(timer);
-  timer = setTimeout(() => syncNow(cloud, buildPayload).catch(() => {}), delay);
+  timer = setTimeout(() => syncNow(cloud, hooks).catch(() => {}), delay);
 }
 
-export async function syncNow(cloud, buildPayload) {
+// Pull Muse's queued changes, apply them on the phone, then upload the log.
+export async function syncNow(cloud, hooks) {
   if (!linked(cloud)) return;
   if (running) { again = true; return; }
   running = true;
   try {
-    await app(cloud, '/sync', { body: buildPayload() });
+    await pullChanges(cloud, hooks);
+    await app(cloud, '/sync', { body: hooks.payload() });
     try { localStorage.setItem(LAST_SYNC_KEY, String(Date.now())); } catch {}
   } finally {
     running = false;
-    if (again) { again = false; scheduleSync(cloud, buildPayload, 500); }
+    if (again) { again = false; scheduleSync(cloud, hooks, 500); }
   }
+}
+
+// Returns how many changes were applied. The phone remembers applied ids, so a
+// change is never applied twice even if the acknowledgement gets lost.
+export async function pullChanges(cloud, hooks) {
+  const { changes = [] } = await app(cloud, '/changes', { method: 'GET' });
+  if (!changes.length) return 0;
+  const ids = hooks.apply(changes);
+  await app(cloud, '/changes/ack', { body: { ids } });
+  return changes.length;
 }
 
 // ---- Push (Firebase Cloud Messaging) -----------------------------------------------------

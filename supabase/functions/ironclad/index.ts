@@ -4,8 +4,8 @@
 // browser tests (tests/index.html) with a fake database and push sender.
 //
 // Who can call what:
-//   Muse (Authorization: Bearer <API key>)   GET /today, /summary, /history · POST /notify, /device-token
-//   The phone app (X-App-Secret header)        POST /sync, /device-token, /notify, /api-key/* · GET /api-key
+//   Muse (Authorization: Bearer <API key>)   GET /today, /summary, /history · POST /log, /reminder, /notify, /device-token
+//   The phone app (X-App-Secret header)        all of the above, plus POST /sync, /changes/ack, /api-key/* · GET /changes, /api-key
 //   Anyone                                     POST /link (only until the phone has linked) · /cron (sends at most
 //                                              one due reminder; returns no data)
 //
@@ -155,6 +155,113 @@ export async function runReminder(env) {
   return res.ok ? 'sent' : `push failed (${res.status})`;
 }
 
+// ---- Logging from Muse -----------------------------------------------------------------
+// Changes are applied here right away (so /today and the reminder see them) and queued
+// for the phone, which applies the same rules (applyApiTasks in js/challenge.js) on its
+// next sync. The phone's log stays the source of truth.
+
+const GOAL_OZ = 128;
+const GOAL_PAGES = 10;
+const MAX_OZ = GOAL_OZ * 2;
+const MAX_PAGES = 2000;
+const MAX_QUEUE = 200;
+const clampInt = (n, lo, hi) => Math.max(lo, Math.min(hi, Math.round(n)));
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+
+// Check a /log body. Returns an error message, or null when valid.
+export function checkLogTasks(tasks) {
+  if (!tasks || typeof tasks !== 'object' || Array.isArray(tasks)) return 'tasks must be an object.';
+  const names = Object.keys(tasks);
+  if (!names.length) return 'tasks is empty.';
+  const flagOk = (v) => typeof v === 'boolean' || (v && typeof v === 'object' && (v.done === undefined || typeof v.done === 'boolean'));
+  for (const name of names) {
+    const v = tasks[name];
+    switch (name) {
+      case 'workout_1':
+      case 'workout_2':
+        if (!flagOk(v) || (typeof v === 'object' && v.outdoor !== undefined && typeof v.outdoor !== 'boolean')) return `${name} must be true/false or {"done": bool, "outdoor": bool}.`;
+        break;
+      case 'diet':
+      case 'no_alcohol':
+        if (!flagOk(v)) return `${name} must be true/false or {"done": bool}.`;
+        break;
+      case 'water':
+        if (!v || typeof v !== 'object' || !(isNum(v.oz) || isNum(v.add_oz) || v.done === true)) return 'water needs "oz", "add_oz" or "done": true.';
+        if ((v.oz !== undefined && !isNum(v.oz)) || (v.add_oz !== undefined && !isNum(v.add_oz))) return 'water amounts must be numbers.';
+        break;
+      case 'reading':
+        if (!v || typeof v !== 'object' || !(isNum(v.pages) || isNum(v.add_pages) || v.done === true || typeof v.title === 'string')) return 'reading needs "pages", "add_pages", "done": true or "title".';
+        if (v.title !== undefined && (typeof v.title !== 'string' || v.title.length > 200)) return 'reading.title must be text (up to 200 characters).';
+        break;
+      case 'progress_photo':
+        return 'Progress photos can only be taken in the app.';
+      default:
+        return `Unknown task "${name}". Use workout_1, workout_2, diet, no_alcohol, water or reading.`;
+    }
+  }
+  return null;
+}
+
+// Apply logged tasks to a day in the API shape. Mirrors applyApiTasks in js/challenge.js.
+export function applyLog(day, tasks, nowIso, lastTitle = null) {
+  const d = structuredClone(day);
+  const t = d.tasks;
+  const before = Object.fromEntries(Object.entries(t).map(([k, v]) => [k, v.done]));
+  const flag = (v) => (typeof v === 'boolean' ? v : v?.done);
+  for (const [name, other] of [['workout_1', 'workout_2'], ['workout_2', 'workout_1']]) {
+    const v = tasks[name];
+    if (v === undefined) continue;
+    if (typeof flag(v) === 'boolean') t[name].done = flag(v);
+    if (typeof v?.outdoor === 'boolean') {
+      t[name].outdoor = v.outdoor;
+      if (v.outdoor) t[other].outdoor = false;
+    }
+  }
+  if (typeof flag(tasks.diet) === 'boolean') t.diet.done = flag(tasks.diet);
+  if (typeof flag(tasks.no_alcohol) === 'boolean') t.no_alcohol.done = flag(tasks.no_alcohol);
+  const w = tasks.water;
+  if (w) {
+    let oz = t.water.oz;
+    if (isNum(w.oz)) oz = w.oz;
+    if (isNum(w.add_oz)) oz += w.add_oz;
+    if (w.done === true) oz = Math.max(oz, GOAL_OZ);
+    t.water.oz = clampInt(oz, 0, MAX_OZ);
+  }
+  t.water.done = t.water.oz >= GOAL_OZ;
+  const r = tasks.reading;
+  if (r) {
+    if (typeof r.title === 'string') t.reading.title = r.title.trim().slice(0, 200) || null;
+    let pages = t.reading.pages;
+    if (isNum(r.pages)) pages = r.pages;
+    if (isNum(r.add_pages)) pages += r.add_pages;
+    if (r.done === true) pages = Math.max(pages, GOAL_PAGES);
+    t.reading.pages = clampInt(pages, 0, MAX_PAGES);
+    if (!t.reading.title && lastTitle) t.reading.title = lastTitle;
+  }
+  t.reading.done = t.reading.pages >= GOAL_PAGES && !!t.reading.title;
+  for (const [k, v] of Object.entries(t)) {
+    if (!v.done) v.done_at = null;
+    else if (!before[k]) v.done_at = nowIso;
+  }
+  d.outdoor_rule_met = (t.workout_1.done && t.workout_1.outdoor) || (t.workout_2.done && t.workout_2.outdoor);
+  d.complete = Object.values(t).every((v) => v.done) && d.outdoor_rule_met;
+  return d;
+}
+
+// Most recent book title, so "reading: 12 pages" counts without repeating the title.
+async function lastTitleBefore(env, date) {
+  const rows = await env.db.getDays(addDays(date, -60), date);
+  return rows.map((r) => r.data?.tasks?.reading?.title).find((t) => t) ?? null;
+}
+
+async function queueChange(env, change) {
+  const queue = (await env.db.getKV('pending_changes')) || [];
+  if (queue.length >= MAX_QUEUE) return false;
+  queue.push(change);
+  await env.db.setKV('pending_changes', queue);
+  return true;
+}
+
 // ---- Request handling ----------------------------------------------------------------
 
 async function matches(env, kvKey, presented) {
@@ -222,12 +329,62 @@ export async function handle(req, env) {
         if (denied) return denied;
         const days = Array.isArray(body.days) ? body.days.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d?.date)) : [];
         if (days.length > 400) return fail(400, 'Too many days in one sync.');
-        if (days.length) {
-          await env.db.upsertDays(days.map((d) => ({ date: d.date, day_number: d.day_number ?? null, data: d, updated_at: env.now().toISOString() })));
-        }
+        // Muse changes the phone hasn't picked up yet stay visible on top of its copy.
+        const pending = ((await env.db.getKV('pending_changes')) || []).filter((c) => c.type === 'log');
+        const rows = days.map((d) => {
+          let data = d;
+          for (const c of pending) if (c.date === d.date) data = applyLog(data, c.tasks, c.created_at);
+          return { date: d.date, day_number: d.day_number ?? null, data, updated_at: env.now().toISOString() };
+        });
+        if (rows.length) await env.db.upsertDays(rows);
         if (body.progress) await env.db.setKV('progress', { ...body.progress, synced_at: env.now().toISOString() });
         if (body.reminder) await env.db.setKV('reminder', { time: body.reminder.time || '20:00', enabled: !!body.reminder.enabled });
         return json({ ok: true, days: days.length });
+      }
+      case 'POST /log': {
+        const { progress, today } = await context(env);
+        const date = body.date ?? today.date;
+        const grace = Number.isInteger(progress?.grace_hour) ? progress.grace_hour : 3;
+        const yesterdayOpen = date === addDays(today.date, -1) && today.time < `${String(grace).padStart(2, '0')}:00`;
+        if (date !== today.date && !yesterdayOpen) return fail(400, `date must be today, or yesterday before ${grace}:00 AM (the grace window).`);
+        const problem = checkLogTasks(body.tasks);
+        if (problem) return fail(400, problem);
+        const dayNumber = dayNumberFor(progress, date);
+        if (progress?.status !== 'active' || dayNumber == null) return fail(409, 'There is no active challenge run on that date.');
+        const nowIso = env.now().toISOString();
+        const change = { id: randomSecret('chg_').slice(0, 24), type: 'log', date, tasks: body.tasks, created_at: nowIso };
+        if (!(await queueChange(env, change))) return fail(429, 'Too many changes waiting for the phone. Open the app to sync.');
+        const rows = await env.db.getDays(date, date);
+        const current = dayView(rows[0]?.data, date, progress);
+        const updated = applyLog(current, body.tasks, nowIso, await lastTitleBefore(env, date));
+        await env.db.upsertDays([{ date, day_number: dayNumber, data: updated, updated_at: nowIso }]);
+        return json({ ok: true, change_id: change.id, day: updated });
+      }
+      case 'POST /reminder': {
+        const current = (await env.db.getKV('reminder')) || { time: '20:00', enabled: true };
+        const { time, enabled } = body;
+        if (time !== undefined && !(typeof time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(time))) return fail(400, 'time must be "HH:MM" (24-hour).');
+        if (enabled !== undefined && typeof enabled !== 'boolean') return fail(400, 'enabled must be true or false.');
+        if (time === undefined && enabled === undefined) return fail(400, 'Send "time" and/or "enabled".');
+        const reminder = { time: time ?? current.time, enabled: enabled ?? current.enabled };
+        await env.db.setKV('reminder', reminder);
+        if (!(await queueChange(env, { id: randomSecret('chg_').slice(0, 24), type: 'reminder', reminder, created_at: env.now().toISOString() }))) {
+          return fail(429, 'Too many changes waiting for the phone. Open the app to sync.');
+        }
+        return json({ ok: true, reminder });
+      }
+      case 'GET /changes': {
+        const denied = needApp();
+        if (denied) return denied;
+        return json({ changes: (await env.db.getKV('pending_changes')) || [] });
+      }
+      case 'POST /changes/ack': {
+        const denied = needApp();
+        if (denied) return denied;
+        const ids = new Set(Array.isArray(body.ids) ? body.ids : []);
+        const queue = (await env.db.getKV('pending_changes')) || [];
+        await env.db.setKV('pending_changes', queue.filter((c) => !ids.has(c.id)));
+        return json({ ok: true });
       }
       case 'GET /api-key': {
         const denied = needApp();

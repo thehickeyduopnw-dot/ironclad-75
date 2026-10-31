@@ -8,7 +8,8 @@
 // Open http://localhost:8080/tests/ to run. Covers the day counter and reset rules.
 import * as C from '../js/challenge.js';
 import * as K from '../js/calories.js';
-import { handle, runReminder, localDate, emptyDay, googleAccessToken, sendFcm } from '../supabase/functions/ironclad/index.ts';
+import { handle, runReminder, localDate, emptyDay, googleAccessToken, sendFcm, applyLog, checkLogTasks } from '../supabase/functions/ironclad/index.ts';
+const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 
 const out = document.getElementById('out');
 let failed = 0;
@@ -371,6 +372,99 @@ await test('fcm: service-account sign-in is correctly signed; message is data-on
 
 await test('api: time zone date math', () => {
   eq(localDate(new Date('2026-11-01T06:30:00Z'), 'America/Los_Angeles'), { date: '2026-10-31', time: '23:30' });
+});
+
+// ---- Muse logging ----
+async function runningEnv() {
+  const ctx = await linkedEnv();
+  const yesterday = syncedDay('2026-10-30', 2);
+  yesterday.tasks.reading.title = 'Deep Work';
+  await api(ctx.env, 'POST', '/sync', { secret: ctx.secret, body: { progress: { ...PROGRESS, grace_hour: 3 }, days: [syncedDay('2026-10-29', 1), yesterday] } });
+  return ctx;
+}
+
+await test('log: Muse logs tasks; /today shows them immediately', async () => {
+  const { env, key } = await runningEnv();
+  let r = await api(env, 'POST', '/log', { key, body: { tasks: { water: { add_oz: 16 }, diet: true } } });
+  eq(r.status, 200);
+  r = await api(env, 'POST', '/log', { key, body: { tasks: { water: { add_oz: 32 }, reading: { pages: 12 }, workout_1: { done: true, outdoor: true } } } });
+  const t = (await api(env, 'GET', '/today', { key })).data;
+  eq([t.tasks.water.oz, t.tasks.water.done, t.tasks.diet.done, typeof t.tasks.diet.done_at], [48, false, true, 'string']);
+  eq([t.tasks.reading.pages, t.tasks.reading.title, t.tasks.reading.done], [12, 'Deep Work', true]); // title carried over
+  eq([t.tasks.workout_1.done, t.outdoor_rule_met, t.complete], [true, true, false]);
+  eq((await api(env, 'GET', '/summary', { key })).data.today_complete, false);
+  eq(env.kv.get('pending_changes').length, 2);
+});
+
+await test('log: bad input, closed days and no run are refused', async () => {
+  const { env, key } = await runningEnv();
+  const bad = async (body) => (await api(env, 'POST', '/log', { key, body })).status;
+  eq(await bad({ tasks: {} }), 400);
+  eq(await bad({ tasks: { progress_photo: true } }), 400);
+  eq(await bad({ tasks: { pushups: true } }), 400);
+  eq(await bad({ tasks: { water: { add_oz: 'lots' } } }), 400);
+  eq(await bad({ tasks: { diet: 'yes' } }), 400);
+  eq(await bad({ date: '2026-10-29', tasks: { diet: true } }), 400); // two days ago
+  eq(await bad({ date: '2026-10-30', tasks: { diet: true } }), 400); // yesterday, but 12 PM: grace closed
+  env.clock = new Date('2026-11-01T08:30:00Z'); // 1:30 AM PDT: yesterday still open
+  eq(await bad({ date: '2026-10-31', tasks: { diet: true } }), 200);
+  eq((await api(env, 'POST', '/log', { body: { tasks: { diet: true } } })).status, 401);
+  const fresh = mockEnv();
+  const s = (await api(fresh, 'POST', '/link', { body: {} })).data.app_secret;
+  eq((await api(fresh, 'POST', '/log', { secret: s, body: { tasks: { diet: true } } })).status, 409); // nothing synced yet
+});
+
+await test('log: the phone picks up changes once; its sync keeps them visible', async () => {
+  const { env, secret, key } = await runningEnv();
+  await api(env, 'POST', '/log', { key, body: { tasks: { water: { add_oz: 16 } } } });
+  eq((await api(env, 'GET', '/changes', { key })).status, 401); // the queue is for the phone only
+  const changes = (await api(env, 'GET', '/changes', { secret })).data.changes;
+  eq([changes.length, changes[0].type, changes[0].date], [1, 'log', '2026-10-31']);
+  // The phone syncs its own (older) copy before applying: the logged water must not vanish.
+  await api(env, 'POST', '/sync', { secret, body: { progress: PROGRESS, days: [emptyDay('2026-10-31', 3)] } });
+  eq((await api(env, 'GET', '/today', { key })).data.tasks.water.oz, 16);
+  await api(env, 'POST', '/changes/ack', { secret, body: { ids: changes.map((c) => c.id) } });
+  eq((await api(env, 'GET', '/changes', { secret })).data.changes, []);
+});
+
+await test('reminder: Muse can change the time or turn it off', async () => {
+  const { env, key, secret } = await runningEnv();
+  eq((await api(env, 'POST', '/reminder', { key, body: { time: '8pm' } })).status, 400);
+  eq((await api(env, 'POST', '/reminder', { key, body: {} })).status, 400);
+  const r = await api(env, 'POST', '/reminder', { key, body: { time: '21:30' } });
+  eq(r.data.reminder, { time: '21:30', enabled: true });
+  eq((await api(env, 'POST', '/reminder', { key, body: { enabled: false } })).data.reminder, { time: '21:30', enabled: false });
+  const queued = (await api(env, 'GET', '/changes', { secret })).data.changes.map((c) => c.reminder);
+  eq(queued, [{ time: '21:30', enabled: true }, { time: '21:30', enabled: false }]);
+});
+
+await test('log: phone and server apply 500 random changes identically', () => {
+  const r = (() => { let s = 7; return () => ((s = (s * 16807) % 2147483647) / 2147483647); })();
+  const pick = (a) => a[Math.floor(r() * a.length)];
+  const randomTasks = () => {
+    const t = {};
+    if (r() < 0.4) t.workout_1 = pick([true, false, { done: true, outdoor: true }, { outdoor: r() < 0.5 }]);
+    if (r() < 0.4) t.workout_2 = pick([true, false, { done: true, outdoor: true }, { done: false }]);
+    if (r() < 0.3) t.diet = pick([true, false, { done: true }]);
+    if (r() < 0.3) t.no_alcohol = pick([true, { done: false }]);
+    if (r() < 0.5) t.water = pick([{ add_oz: 16 }, { add_oz: -16 }, { oz: Math.floor(r() * 300) }, { done: true }, { add_oz: 400 }]);
+    if (r() < 0.5) t.reading = pick([{ pages: Math.floor(r() * 20) }, { add_pages: 5 }, { done: true }, { title: pick(['', 'Grit']) }, { pages: 3000 }]);
+    return Object.keys(t).length ? t : { diet: true };
+  };
+  for (let i = 0; i < 500; i++) {
+    let phone = C.normalizeDay(r() < 0.5 ? undefined : { water: 64, reading: { title: 'Book', pages: 4 }, diet: true });
+    const last = pick(['', 'Last Book']);
+    let server = C.toApiDay(phone, '2026-10-31', 3);
+    for (let n = 0; n < 4; n++) {
+      const tasks = randomTasks();
+      assert(checkLogTasks(tasks) === null, `generated invalid tasks ${JSON.stringify(tasks)}`);
+      C.applyApiTasks(phone, tasks, last);
+      server = applyLog(server, tasks, '2026-10-31T12:00:00Z', last || null);
+      const p = C.toApiDay(phone, '2026-10-31', 3);
+      const strip = (d) => ({ complete: d.complete, outdoor: d.outdoor_rule_met, tasks: Object.fromEntries(Object.entries(d.tasks).map(([k, v]) => [k, { ...v, done_at: undefined }])) });
+      eq(strip(p), strip(server));
+    }
+  }
 });
 
 

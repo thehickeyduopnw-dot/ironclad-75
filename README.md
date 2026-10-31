@@ -24,7 +24,7 @@ Keep using the same link: your data is saved under that address.
 
 ## Cloud backend and Muse API
 
-An optional backend on **Supabase** (database + Edge Function) syncs your daily log so the **Muse** assistant can read your progress and send you notifications. Push uses **Firebase Cloud Messaging (FCM)**. Both are free plans, and no credit card is needed. The app stays local-first: it saves on the phone first, works fully offline, and syncs quietly when it can. Photos never leave the phone. API details are in [docs/API.md](docs/API.md).
+An optional backend on **Supabase** (database + Edge Function) syncs your daily log so the **Muse** assistant can read your progress, log tasks for you, change your reminder, and send you notifications. Push uses **Firebase Cloud Messaging (FCM)**. Both are free plans, and no credit card is needed. The app stays local-first: it saves on the phone first, works fully offline, and syncs quietly when it can. Photos never leave the phone. API details are in [docs/API.md](docs/API.md).
 
 The evening reminder runs on this backend too. Without it, Today still shows a reminder banner after your reminder time.
 

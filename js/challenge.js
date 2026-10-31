@@ -290,3 +290,66 @@ export function runForKey(state, key) {
   }
   return null;
 }
+
+// ---- Cloud API shapes (see supabase/functions/ironclad) ---------------------------------
+
+// One day as the API returns it.
+export function toApiDay(raw, key, dayNumber) {
+  const d = normalizeDay(raw);
+  const s = taskState(d);
+  const t = (id) => ({ done: s[id], done_at: s[id] ? d.doneAt?.[id] ?? null : null });
+  return {
+    date: key,
+    day_number: dayNumber,
+    complete: isDayComplete(raw),
+    outdoor_rule_met: s.outdoor,
+    logged_off_app: !!raw?.manual,
+    tasks: {
+      workout_1: { ...t('workout1'), minutes: 45, outdoor: d.workout1.outdoor },
+      workout_2: { ...t('workout2'), minutes: 45, outdoor: d.workout2.outdoor },
+      diet: t('diet'),
+      no_alcohol: t('alcohol'),
+      water: { ...t('water'), oz: d.water, goal_oz: WATER_GOAL_OZ },
+      reading: { ...t('reading'), pages: d.reading.pages, goal_pages: PAGES_GOAL, title: d.reading.title.trim() || null },
+      progress_photo: t('photo'),
+    },
+  };
+}
+
+export const MAX_WATER_OZ = WATER_GOAL_OZ * 2;
+export const MAX_PAGES = 2000;
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, Math.round(n)));
+
+// Apply a logged change from the API (e.g. sent by Muse) to a day, in place.
+// The server applies the same rules to its copy (applyLog in the Edge Function).
+export function applyApiTasks(d, tasks, lastTitle = '') {
+  const flag = (v) => (typeof v === 'boolean' ? v : v?.done);
+  for (const [api, id, other] of [['workout_1', 'workout1', 'workout2'], ['workout_2', 'workout2', 'workout1']]) {
+    const v = tasks[api];
+    if (v === undefined) continue;
+    if (typeof flag(v) === 'boolean') d[id].done = flag(v);
+    if (typeof v?.outdoor === 'boolean') {
+      d[id].outdoor = v.outdoor;
+      if (v.outdoor) d[other].outdoor = false; // only one needs to be the outdoor one
+    }
+  }
+  if (typeof flag(tasks.diet) === 'boolean') d.diet = flag(tasks.diet);
+  if (typeof flag(tasks.no_alcohol) === 'boolean') d.alcohol = flag(tasks.no_alcohol);
+  const w = tasks.water;
+  if (w) {
+    if (typeof w.oz === 'number') d.water = w.oz;
+    if (typeof w.add_oz === 'number') d.water += w.add_oz;
+    if (w.done === true) d.water = Math.max(d.water, WATER_GOAL_OZ);
+    d.water = clamp(d.water, 0, MAX_WATER_OZ);
+  }
+  const r = tasks.reading;
+  if (r) {
+    if (typeof r.title === 'string') d.reading.title = r.title.trim().slice(0, 200);
+    if (typeof r.pages === 'number') d.reading.pages = r.pages;
+    if (typeof r.add_pages === 'number') d.reading.pages += r.add_pages;
+    if (r.done === true) d.reading.pages = Math.max(d.reading.pages, PAGES_GOAL);
+    d.reading.pages = clamp(d.reading.pages, 0, MAX_PAGES);
+    if (!d.reading.title && lastTitle) d.reading.title = lastTitle;
+  }
+  return d;
+}

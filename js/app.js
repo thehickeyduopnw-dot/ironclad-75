@@ -66,10 +66,14 @@ async function init() {
   render();
   store.requestPersistence();
   if (cloudOn()) {
-    cloud.syncNow(state.cloud, cloudPayload).catch(() => {});
+    syncNow().catch(() => {});
     refreshPushToken(false).catch(() => {});
   }
   addEventListener('online', syncSoon);
+  // While the app is open, pick up anything Muse logged within a minute.
+  setInterval(() => {
+    if (cloudOn() && !document.hidden && navigator.onLine) cloud.pullChanges(state.cloud, cloudHooks).catch(() => {});
+  }, 60000);
 
   setInterval(() => tick(false), 20000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(true); });
@@ -116,31 +120,35 @@ function save() {
 // Test mode never syncs: practice data must not reach the real backend.
 
 const cloudOn = () => !clock.isDebug && !storageBroken && cloud.linked(state.cloud);
-const syncSoon = () => { if (cloudOn()) cloud.scheduleSync(state.cloud, cloudPayload); };
+const cloudHooks = { payload: () => cloudPayload(), apply: (changes) => applyRemoteChanges(changes) };
+const syncSoon = () => { if (cloudOn()) cloud.scheduleSync(state.cloud, cloudHooks); };
+const syncNow = () => cloud.syncNow(state.cloud, cloudHooks);
 
-// One day in the API's shape (see supabase/functions/ironclad).
-function apiDay(key, dayNumber) {
-  const raw = state.days[key];
-  const d = C.normalizeDay(raw);
-  const s = C.taskState(d);
-  const at = (id) => d.doneAt?.[id] ?? null;
-  const t = (id) => ({ done: s[id], done_at: s[id] ? at(id) : null });
-  return {
-    date: key,
-    day_number: dayNumber,
-    complete: C.isDayComplete(raw),
-    outdoor_rule_met: s.outdoor,
-    logged_off_app: !!raw?.manual,
-    tasks: {
-      workout_1: { ...t('workout1'), minutes: 45, outdoor: d.workout1.outdoor },
-      workout_2: { ...t('workout2'), minutes: 45, outdoor: d.workout2.outdoor },
-      diet: t('diet'),
-      no_alcohol: t('alcohol'),
-      water: { ...t('water'), oz: d.water, goal_oz: C.WATER_GOAL_OZ },
-      reading: { ...t('reading'), pages: d.reading.pages, goal_pages: C.PAGES_GOAL, title: d.reading.title.trim() || null },
-      progress_photo: t('photo'),
-    },
-  };
+// Changes Muse made through the API. Each is checked against the same rules as a tap
+// (only open days of an active run), applied once, and acknowledged.
+function applyRemoteChanges(changes) {
+  const seen = new Set(state.cloud.appliedIds || []);
+  const ids = [];
+  const logged = [];
+  for (const ch of changes) {
+    ids.push(ch.id);
+    if (seen.has(ch.id)) continue;
+    seen.add(ch.id);
+    if (ch.type === 'reminder' && ch.reminder) {
+      state = { ...state, settings: { ...state.settings, reminderTime: ch.reminder.time, reminderPush: ch.reminder.enabled } };
+      logged.push('reminder');
+    } else if (ch.type === 'log') {
+      const res = updateDay(ch.date, (d) => C.applyApiTasks(d, ch.tasks, C.lastReadingTitle(state, ch.date)), { quiet: true, at: ch.created_at });
+      if (res.applied) logged.push(...Object.keys(ch.tasks).map((k) => k.replace('_', ' ')));
+    }
+  }
+  state = { ...state, cloud: { ...state.cloud, appliedIds: [...seen].slice(-300) } };
+  save();
+  if (logged.length) {
+    render();
+    toast(`Updated from Muse: ${[...new Set(logged)].join(', ')}`);
+  }
+  return ids;
 }
 
 function cloudPayload() {
@@ -152,7 +160,7 @@ function cloudPayload() {
     for (let i = 0; i < C.TOTAL_DAYS; i++) {
       const key = C.addDays(a.startDate, i);
       if (key > today) break;
-      days.push(apiDay(key, i + 1));
+      days.push(C.toApiDay(state.days[key], key, i + 1));
     }
   }
   const st = C.computeStats(state, now);
@@ -164,6 +172,7 @@ function cloudPayload() {
       longest_streak: st.longestStreak,
       attempt: a?.status === 'completed' ? state.attempts.length : state.attempts.length + 1,
       tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      grace_hour: state.settings.graceHour,
     },
     days,
     reminder: { time: state.settings.reminderTime, enabled: state.settings.reminderPush !== false },
@@ -805,7 +814,7 @@ function cloudGroup() {
         <label for="cloud-url">Backend address</label>
         <input id="cloud-url" class="field" type="url" inputmode="url" autocomplete="off" placeholder="https://xxxx.supabase.co/functions/v1/ironclad">
         <button class="btn-primary" data-action="cloud-link">Connect</button>
-        <small class="muted">Syncs your daily log so Muse can read it, and enables push notifications. Your photos stay on the phone. One-time setup: <a href="${README_URL}" target="_blank" rel="noopener">guide</a>.</small>
+        <small class="muted">Syncs your daily log so Muse can read it and log tasks for you, and enables push notifications. Your photos stay on the phone. One-time setup: <a href="${README_URL}" target="_blank" rel="noopener">guide</a>.</small>
       </div></div>`;
   }
   const last = cloud.lastSync();
@@ -900,13 +909,18 @@ function debugPanel() {
 // ---- Actions -------------------------------------------------------------------
 
 // Apply a change to one day's log, then give feedback for anything newly finished.
-function updateDay(key, mutate, { rerender = true } = {}) {
+// `quiet` (changes from Muse): no sounds or screen updates; the caller re-renders.
+// `at`: when the change was made, for the done_at times.
+function updateDay(key, mutate, { rerender = true, quiet = false, at = null } = {}) {
   // The 20-second clock check may lag: make sure this day is still open first.
   evaluateNow();
-  if (state.attempt?.status !== 'active' || !C.openKeys(clock.now(), state.settings.graceHour).includes(key)) {
-    render();
-    toast('That day has closed.');
-    return { gained: [] };
+  const a = state.attempt;
+  if (a?.status !== 'active' || key < a.startDate || !C.openKeys(clock.now(), state.settings.graceHour).includes(key)) {
+    if (!quiet) {
+      render();
+      toast('That day has closed.');
+    }
+    return { gained: [], applied: false };
   }
   const before = C.normalizeDay(state.days[key]);
   const prev = C.taskState(before);
@@ -920,12 +934,13 @@ function updateDay(key, mutate, { rerender = true } = {}) {
   // When each task was finished (shared with Muse through the API).
   day.doneAt = { ...day.doneAt };
   for (const t of C.TASKS) {
-    if (gained.includes(t.id)) day.doneAt[t.id] = clock.now().toISOString();
+    if (gained.includes(t.id)) day.doneAt[t.id] = at || clock.now().toISOString();
     else if (!next[t.id]) delete day.doneAt[t.id];
   }
 
   state = { ...state, days: { ...state.days, [key]: day } };
   save();
+  if (quiet) return { gained, applied: true };
 
   if (rerender) render();
   else patchToday();
@@ -936,7 +951,7 @@ function updateDay(key, mutate, { rerender = true } = {}) {
     screen.querySelector('#status')?.classList.add('just-done');
   } else if (gained.length) fx.taskDone();
   else if (lost) fx.taskUndone();
-  return { gained };
+  return { gained, applied: true };
 }
 
 // Further back than this, the "done off-app" days alone would finish the challenge.
@@ -1022,7 +1037,7 @@ const actions = {
       const linkedCloud = await cloud.link(document.getElementById('cloud-url').value.trim());
       state = { ...state, cloud: linkedCloud };
       save();
-      await cloud.syncNow(state.cloud, cloudPayload);
+      await syncNow();
       const token = await refreshPushToken(true).catch(() => null);
       apiKeyInfo = null;
       render();
@@ -1032,7 +1047,7 @@ const actions = {
   },
   'cloud-sync'(el) {
     busy(el, 'Syncing…', async () => {
-      await cloud.syncNow(state.cloud, cloudPayload);
+      await syncNow();
       render();
     });
   },

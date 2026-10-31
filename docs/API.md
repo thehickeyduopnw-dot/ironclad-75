@@ -4,6 +4,8 @@
 
 **Auth:** every request needs `Authorization: Bearer <API_KEY>`. Generate the key in the app (Settings → Cloud & Muse → API key for Muse). A missing or wrong key gets `401 {"error": "Missing or invalid API key."}` and no data.
 
+**What Muse can do:** read today, the summary and history; log tasks (`/log`); change the evening reminder (`/reminder`); and send notifications (`/notify`). What stays in the app: progress photos, and starting or restarting the challenge.
+
 All responses are JSON. Errors are `{"error": "..."}` with a matching status: `400` bad input, `401` bad key, `404` unknown path, `409` no phone registered for push, `502` the push service refused, `500` server error.
 
 Dates are the phone's local dates. Times (`done_at`, `synced_at`) are ISO 8601 UTC. `synced_at` is when the phone last synced: if the phone hasn't been opened today, today's tasks show as not done.
@@ -69,6 +71,42 @@ curl "https://<project-ref>.supabase.co/functions/v1/ironclad/history?days=7" \
 
 Returns `{ "days": [ ...7 days, newest first, each shaped like /today... ], "synced_at": "..." }`. `days` can be 1–365 and defaults to 7. Days with nothing logged come back with every task not done.
 
+## POST /log
+
+Logs activity for today. Only include the tasks you're changing.
+
+```bash
+curl -X POST https://<project-ref>.supabase.co/functions/v1/ironclad/log \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"tasks": {"water": {"add_oz": 16}, "diet": true, "workout_1": {"done": true, "outdoor": true}}}'
+```
+
+Response: `{"ok": true, "change_id": "chg_...", "day": { ...today, shaped like /today... }}`. The change shows in `/today` right away. The phone applies it the next time the app opens or comes to the foreground, or within a minute if it's already open.
+
+| Task | Accepts |
+|---|---|
+| `workout_1`, `workout_2` | `true` / `false`, or `{"done": bool, "outdoor": bool}`. Marking one outdoor clears the other. |
+| `diet`, `no_alcohol` | `true` / `false`, or `{"done": bool}` |
+| `water` | `{"add_oz": 16}` (negative to undo), `{"oz": 96}` (set the total), or `{"done": true}` (a full gallon). 0–256 oz. |
+| `reading` | `{"add_pages": 5}`, `{"pages": 12}`, `{"done": true}` (10 pages), and/or `{"title": "..."}`. The last book title is reused if none is given. |
+| `progress_photo` | Not accepted: photos are taken in the app. |
+
+Optional `"date"`: today, or yesterday until your grace window closes (3 AM by default), just like in the app. Errors: `400` invalid task or closed date, `409` no active run, `429` over 200 changes waiting for the phone.
+
+## POST /reminder
+
+Changes the evening reminder (the push sent if the day isn't finished).
+
+```bash
+curl -X POST https://<project-ref>.supabase.co/functions/v1/ironclad/reminder \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"time": "21:30", "enabled": true}'
+```
+
+Response: `{"ok": true, "reminder": {"time": "21:30", "enabled": true}}`. `time` is 24-hour `HH:MM`; either field can be sent alone. The app's Settings update to match.
+
 ## POST /notify
 
 ```bash
@@ -78,7 +116,7 @@ curl -X POST https://<project-ref>.supabase.co/functions/v1/ironclad/notify \
   -d '{"title": "Day 23", "body": "Two tasks left: water and photo."}'
 ```
 
-Response: `{"ok": true, "sent": true}`. `title` is required (up to 200 characters); `body` is optional (up to 1000). Tapping the notification opens the app.
+Response: `{"ok": true, "sent": true}`. `title` is required (up to 200 characters); `body` is optional (up to 1000). Tapping the notification opens the app. Use this for any reminder at any time.
 
 ## POST /device-token
 
