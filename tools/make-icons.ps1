@@ -12,11 +12,11 @@ function Draw-Icon([int]$size, [string]$name, [double]$inset) {
   $g.TextRenderingHint = 'AntiAliasGridFit'
   $g.Clear([System.Drawing.Color]::FromArgb(11, 11, 12))
 
-  # Lime bar along the bottom, a "progress" stripe
-  $lime = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(212, 255, 58))
+  # Red bar along the bottom, a "progress" stripe
+  $red = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(229, 32, 46))
   $pad = $size * $inset
   $barH = $size * 0.07
-  $g.FillRectangle($lime, [single]$pad, [single]($size - $pad - $barH), [single]($size - 2 * $pad), [single]$barH)
+  $g.FillRectangle($red, [single]$pad, [single]($size - $pad - $barH), [single]($size - 2 * $pad), [single]$barH)
 
   # Big "75"
   $font = [System.Drawing.Font]::new('Arial Black', [single]($size * (0.5 - $inset * 0.6)), [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
@@ -24,7 +24,7 @@ function Draw-Icon([int]$size, [string]$name, [double]$inset) {
   $fmt.Alignment = 'Center'
   $fmt.LineAlignment = 'Center'
   $rect = [System.Drawing.RectangleF]::new(0, [single](-$size * 0.04), $size, $size)
-  $g.DrawString('75', $font, $lime, $rect, $fmt)
+  $g.DrawString('75', $font, $red, $rect, $fmt)
 
   $bmp.Save((Join-Path $out $name), [System.Drawing.Imaging.ImageFormat]::Png)
   $g.Dispose(); $bmp.Dispose()
