@@ -8,6 +8,7 @@
 // Open http://localhost:8080/tests/ to run. Covers the day counter and reset rules.
 import * as C from '../js/challenge.js';
 import * as K from '../js/calories.js';
+import * as B from '../js/backup.js';
 import { handle, runReminder, localDate, emptyDay, googleAccessToken, sendFcm, applyLog, checkLogTasks } from '../supabase/functions/ironclad/index.ts';
 const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
 
@@ -257,7 +258,7 @@ const PROGRESS = { start_date: '2026-10-29', status: 'active', total_days_comple
 
 await test('api: missing or wrong key gets 401 and no data, on every endpoint', async () => {
   const { env } = await linkedEnv();
-  for (const [m, p] of [['GET', '/today'], ['GET', '/summary'], ['GET', '/history?days=7'], ['POST', '/notify'], ['POST', '/device-token'], ['POST', '/sync'], ['POST', '/api-key/regenerate']]) {
+  for (const [m, p] of [['GET', '/today'], ['GET', '/summary'], ['GET', '/history?days=7'], ['GET', '/reminder'], ['POST', '/notify'], ['POST', '/device-token'], ['POST', '/sync'], ['POST', '/api-key/regenerate']]) {
     for (const key of [undefined, 'ic75_wrong']) {
       const r = await api(env, m, p, { key, body: m === 'POST' ? { title: 'x', token: 'x'.repeat(30) } : undefined });
       eq(r.status, 401);
@@ -289,7 +290,7 @@ await test('api: /today and /summary reflect the synced log', async () => {
   eq([today.date, today.day_number, today.complete, today.tasks.water.oz, today.tasks.diet.done], ['2026-10-31', 3, false, 64, true]);
   eq(typeof today.synced_at, 'string');
   const summary = (await api(env, 'GET', '/summary', { key })).data;
-  eq(summary, { start_date: '2026-10-29', current_day: 3, total_days_completed: 2, today_complete: false, status: 'active', synced_at: summary.synced_at });
+  eq(summary, { start_date: '2026-10-29', current_day: 3, total_days_completed: 2, today_complete: false, status: 'active', attempts: 1, last_reset_date: null, last_reset_missing: null, synced_at: summary.synced_at, synced_minutes_ago: 0, stale: false });
 });
 
 await test('api: unsynced today still gets the right day number, all tasks not done', async () => {
@@ -306,16 +307,18 @@ await test('api: /history returns N days, newest first, and validates days', asy
   const h7 = (await api(env, 'GET', '/history?days=7', { key })).data.days;
   eq(h7.map((d) => d.date), ['2026-10-31', '2026-10-30', '2026-10-29', '2026-10-28', '2026-10-27', '2026-10-26', '2026-10-25']);
   eq(h7.map((d) => d.day_number), [3, 2, 1, null, null, null, null]);
+  eq(h7.map((d) => d.in_run), [true, true, true, false, false, false, false]);
   eq((await api(env, 'GET', '/history?days=30', { key })).data.days.length, 30);
   eq((await api(env, 'GET', '/history', { key })).data.days.length, 7);
   for (const bad of ['0', 'abc', '2.5', '400']) eq((await api(env, 'GET', `/history?days=${bad}`, { key })).status, 400);
 });
 
 await test('api: /device-token then /notify sends a real push; errors are clear', async () => {
-  const { env, key } = await linkedEnv();
+  const { env, key, secret } = await linkedEnv();
   eq((await api(env, 'POST', '/notify', { key, body: { title: 'Hi', body: 'x' } })).status, 409); // no phone yet
-  eq((await api(env, 'POST', '/device-token', { key, body: { token: 'short' } })).status, 400);
-  eq((await api(env, 'POST', '/device-token', { key, body: { token: 'fcm-token-'.repeat(5), platform: 'android' } })).status, 200);
+  eq((await api(env, 'POST', '/device-token', { key, body: { token: 'fcm-token-'.repeat(5) } })).status, 401); // only the phone can register
+  eq((await api(env, 'POST', '/device-token', { secret, body: { token: 'short' } })).status, 400);
+  eq((await api(env, 'POST', '/device-token', { secret, body: { token: 'fcm-token-'.repeat(5), platform: 'android' } })).status, 200);
   eq((await api(env, 'POST', '/notify', { key, body: { body: 'no title' } })).status, 400);
   const ok = await api(env, 'POST', '/notify', { key, body: { title: 'Muse', body: 'Drink some water' } });
   eq([ok.status, ok.data], [200, { ok: true, sent: true }]);
@@ -328,7 +331,7 @@ await test('api: /device-token then /notify sends a real push; errors are clear'
 
 await test('api: evening reminder sends once, only when the day is unfinished', async () => {
   const { env, secret, key } = await linkedEnv();
-  await api(env, 'POST', '/device-token', { key, body: { token: 'fcm-token-'.repeat(5) } });
+  await api(env, 'POST', '/device-token', { secret, body: { token: 'fcm-token-'.repeat(5) } });
   await api(env, 'POST', '/sync', { secret, body: { progress: PROGRESS, days: [syncedDay('2026-10-31', 3, { complete: false })], reminder: { time: '20:00', enabled: true } } });
   env.clock = new Date('2026-11-01T02:55:00Z'); // 7:55 PM PDT
   eq(await runReminder(env), 'waiting');
@@ -342,7 +345,10 @@ await test('api: evening reminder sends once, only when the day is unfinished', 
   eq(await runReminder(env), 'day complete');
   await api(env, 'POST', '/sync', { secret, body: { reminder: { time: '20:00', enabled: false } } });
   eq(await runReminder(env), 'off');
-  eq((await api(env, 'POST', '/cron')).data.result, 'off'); // public cron route returns no data
+  eq((await api(env, 'POST', '/cron')).status, 401); // no cron secret
+  env.kv.set('cron_secret', { secret: 's3cret' });
+  eq((await api(env, 'POST', '/cron?secret=wrong')).status, 401);
+  eq((await api(env, 'POST', '/cron?secret=s3cret')).data, { result: 'off' }); // returns no data
   eq(env.sent.length, 1);
 });
 
@@ -427,6 +433,26 @@ await test('log: the phone picks up changes once; its sync keeps them visible', 
   eq((await api(env, 'GET', '/changes', { secret })).data.changes, []);
 });
 
+await test('log: a lost acknowledgement never double-counts "add" changes', async () => {
+  const { env, secret, key } = await runningEnv();
+  const id = (await api(env, 'POST', '/log', { key, body: { tasks: { water: { add_oz: 16 } } } })).data.change_id;
+  // The phone applied it (its copy now has 16 oz) but the ack never arrived.
+  const applied = emptyDay('2026-10-31', 3);
+  applied.tasks.water.oz = 16;
+  await api(env, 'POST', '/sync', { secret, body: { progress: PROGRESS, days: [applied], applied_ids: [id] } });
+  eq((await api(env, 'GET', '/today', { key })).data.tasks.water.oz, 16); // not 32
+  eq((await api(env, 'GET', '/changes', { secret })).data.changes, []); // the sync cleared it
+});
+
+await test('log: a change the phone rejects disappears from the API', async () => {
+  const { env, secret, key } = await runningEnv();
+  const id = (await api(env, 'POST', '/log', { key, body: { tasks: { diet: true } } })).data.change_id;
+  eq((await api(env, 'GET', '/today', { key })).data.tasks.diet.done, true); // shown while pending
+  await api(env, 'POST', '/changes/ack', { secret, body: { ids: [], rejected: [id] } });
+  eq((await api(env, 'GET', '/today', { key })).data.tasks.diet.done, false);
+  eq((await api(env, 'GET', '/changes', { secret })).data.changes, []);
+});
+
 await test('reminder: Muse can change the time or turn it off', async () => {
   const { env, key, secret } = await runningEnv();
   eq((await api(env, 'POST', '/reminder', { key, body: { time: '8pm' } })).status, 400);
@@ -443,12 +469,12 @@ await test('log: phone and server apply 500 random changes identically', () => {
   const pick = (a) => a[Math.floor(r() * a.length)];
   const randomTasks = () => {
     const t = {};
-    if (r() < 0.4) t.workout_1 = pick([true, false, { done: true, outdoor: true }, { outdoor: r() < 0.5 }]);
-    if (r() < 0.4) t.workout_2 = pick([true, false, { done: true, outdoor: true }, { done: false }]);
+    if (r() < 0.4) t.workout_1 = pick([true, false, { done: true, outdoor: true }, { outdoor: r() < 0.5 }, { done: true, minutes: 50 }, { started_at: '2026-10-31T13:00:00Z', ended_at: '2026-10-31T13:47:00Z', done: true }]);
+    if (r() < 0.4) t.workout_2 = pick([true, false, { done: true, outdoor: true }, { done: false }, { started_at: '2026-10-31T18:00:00Z' }, { minutes: 60 }]);
     if (r() < 0.3) t.diet = pick([true, false, { done: true }]);
     if (r() < 0.3) t.no_alcohol = pick([true, { done: false }]);
-    if (r() < 0.5) t.water = pick([{ add_oz: 16 }, { add_oz: -16 }, { oz: Math.floor(r() * 300) }, { done: true }, { add_oz: 400 }]);
-    if (r() < 0.5) t.reading = pick([{ pages: Math.floor(r() * 20) }, { add_pages: 5 }, { done: true }, { title: pick(['', 'Grit']) }, { pages: 3000 }]);
+    if (r() < 0.5) t.water = pick([{ add_oz: 16 }, { add_oz: -16 }, { oz: Math.floor(r() * 300) }, { done: true }, { done: false }, { add_oz: 400 }]);
+    if (r() < 0.5) t.reading = pick([{ pages: Math.floor(r() * 20) }, { add_pages: 5 }, { done: true }, { done: false }, { title: pick(['', 'Grit']) }, { pages: 3000 }]);
     return Object.keys(t).length ? t : { diet: true };
   };
   for (let i = 0; i < 500; i++) {
@@ -465,6 +491,96 @@ await test('log: phone and server apply 500 random changes identically', () => {
       eq(strip(p), strip(server));
     }
   }
+});
+
+// ---- Fix list (review of 2026-10-31) ----
+
+await test('#1 backups leave out the cloud secret and push token; restore asks to re-link', () => {
+  const s = { ...C.defaultState(), cloud: { url: 'https://x.supabase.co/functions/v1/ironclad', secret: 'app_SECRET', pushToken: 'tok', appliedIds: ['chg_1'] } };
+  const out = B.backupState(s);
+  eq(out.cloud, { url: 'https://x.supabase.co/functions/v1/ironclad', appliedIds: ['chg_1'] });
+  eq(JSON.stringify(out).includes('app_SECRET') || JSON.stringify(out).includes('"tok"'), false);
+  eq(s.cloud.secret, 'app_SECRET'); // the live state isn't touched
+  const back = B.restoredState(out);
+  eq([back.cloud.secret, back.cloud.needsRelink, back.cloud.url], ['', true, s.cloud.url]);
+  eq(B.restoredState({ ...s }).cloud.secret, 'app_SECRET'); // older backups still work
+  eq(B.restoredState({ ...s }).cloud.pushToken, null);
+});
+
+await test('#2 /summary reports attempts and the last reset; /history marks in-run days', async () => {
+  const { env, secret, key } = await linkedEnv();
+  await api(env, 'POST', '/sync', { secret, body: { progress: { ...PROGRESS, attempts: 3, last_reset_date: '2026-10-27', last_reset_missing: ['Water', 'Reading'] }, days: [] } });
+  const s = (await api(env, 'GET', '/summary', { key })).data;
+  eq([s.attempts, s.last_reset_date, s.last_reset_missing], [3, '2026-10-27', ['Water', 'Reading']]);
+});
+
+await test('#3 workout timing: real minutes in the API; back-to-back warning', () => {
+  const day = C.normalizeDay(undefined);
+  Object.assign(day.workout1, { done: true, startedAt: '2026-10-31T13:00:00Z', endedAt: '2026-10-31T13:52:00Z', minutes: 52 });
+  const api1 = C.toApiDay(day, '2026-10-31', 3).tasks;
+  eq([api1.workout_1.minutes, api1.workout_1.target_minutes, api1.workout_1.started_at], [52, 45, '2026-10-31T13:00:00Z']);
+  eq([api1.workout_2.minutes, api1.workout_2.started_at], [null, null]); // untimed: unknown, not 45
+  eq(C.workoutsBackToBack(day), false); // second not started
+  day.workout2.startedAt = '2026-10-31T14:10:00Z'; // 18 min after the first ended
+  eq(C.workoutsBackToBack(day), true);
+  day.workout2.startedAt = '2026-10-31T18:00:00Z';
+  eq(C.workoutsBackToBack(day), false);
+  day.workout2.startedAt = '2026-10-31T12:00:00Z'; // second started first and is still running
+  eq(C.workoutsBackToBack(day), false);
+  eq(C.elapsedMinutes('2026-10-31T13:00:00Z', '2026-10-31T13:45:29Z'), 45);
+  eq(C.workoutRunning({ startedAt: 'x', endedAt: null, done: false }), true);
+});
+
+await test('#4 /today and /summary flag stale data after 3 hours', async () => {
+  const { env, secret, key } = await linkedEnv();
+  await api(env, 'POST', '/sync', { secret, body: { progress: PROGRESS, days: [] } });
+  let t = (await api(env, 'GET', '/today', { key })).data;
+  eq([t.stale, t.synced_minutes_ago], [false, 0]);
+  env.clock = new Date(env.clock.getTime() + 181 * 60000);
+  t = (await api(env, 'GET', '/today', { key })).data;
+  eq([t.stale, t.synced_minutes_ago], [true, 181]);
+  eq((await api(env, 'GET', '/summary', { key })).data.stale, true);
+  const fresh = await linkedEnv();
+  eq((await api(fresh.env, 'GET', '/summary', { key: fresh.key })).data.stale, true); // never synced
+});
+
+await test('#5 GET /reminder reads the current reminder', async () => {
+  const { env, key } = await runningEnv();
+  eq((await api(env, 'GET', '/reminder', { key })).data, { time: '20:00', enabled: true });
+  await api(env, 'POST', '/reminder', { key, body: { time: '21:45', enabled: false } });
+  eq((await api(env, 'GET', '/reminder', { key })).data, { time: '21:45', enabled: false });
+});
+
+await test('#7 grace-window reset keeps a completed yesterday as Day 1', () => {
+  // Oct 29 was missed. At 1 AM on Oct 31 (grace window), Oct 30 is still open and complete.
+  const s = started('2026-10-25');
+  for (let k = '2026-10-25'; k < '2026-10-29'; k = C.addDays(k, 1)) s.days[k] = fullDay();
+  s.days['2026-10-30'] = fullDay();
+  const { state, event } = C.evaluate(s, at('2026-10-31', 1));
+  eq([event.type, event.failedDay], ['reset', 5]);
+  eq(state.attempt.startDate, '2026-10-30');
+  eq(C.evaluate(state, at('2026-10-31', 4)).event, null); // Oct 30 counts as a finished Day 1
+  // Unfinished yesterday: the new run starts today instead.
+  const s2 = started('2026-10-25');
+  for (let k = '2026-10-25'; k < '2026-10-29'; k = C.addDays(k, 1)) s2.days[k] = fullDay();
+  eq(C.evaluate(s2, at('2026-10-31', 1)).state.attempt.startDate, '2026-10-31');
+});
+
+await test('#8 /sync rejects impossible dates with a 400', async () => {
+  const { env, secret } = await linkedEnv();
+  for (const date of ['2026-02-30', '2026-13-01', 'not-a-date', null]) {
+    eq((await api(env, 'POST', '/sync', { secret, body: { days: [{ date }] } })).status, 400);
+  }
+  eq((await api(env, 'POST', '/sync', { secret, body: { days: [emptyDay('2028-02-29', 1)] } })).status, 200); // leap day
+});
+
+await test('#11 /log accepts done:false for water and reading', async () => {
+  const { env, key } = await runningEnv();
+  await api(env, 'POST', '/log', { key, body: { tasks: { water: { oz: 140 }, reading: { pages: 15 } } } });
+  const r = await api(env, 'POST', '/log', { key, body: { tasks: { water: { done: false }, reading: { done: false } } } });
+  eq(r.status, 200);
+  eq([r.data.day.tasks.water.oz, r.data.day.tasks.water.done, r.data.day.tasks.reading.pages, r.data.day.tasks.reading.done], [112, false, 9, false]);
+  eq((await api(env, 'POST', '/log', { key, body: { tasks: { water: { done: 'no' } } } })).status, 400);
 });
 
 

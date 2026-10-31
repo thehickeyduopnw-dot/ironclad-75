@@ -387,6 +387,29 @@ select {
 .causes .bar { height: 10px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
 .causes .bar i { display: block; height: 100%; background: var(--danger); border-radius: inherit; }
 
+/* ---- Workout timer, water presets, close countdown ----------------------------- */
+
+.workout { flex-direction: column; align-items: stretch; }
+.workout-top { display: flex; align-items: center; }
+.workout-top .card-main { flex: 1; padding-right: 8px; }
+.workout-timer { display: flex; align-items: center; gap: 8px; padding: 0 14px 14px 18px; }
+.workout-timer .chip { margin-right: 0; }
+.chip.timer svg { fill: currentColor; stroke: none; }
+.chip.timer.on { background: var(--accent); color: var(--accent-ink); }
+.elapsed { flex: 1; font-size: 26px; font-weight: 900; font-variant-numeric: tabular-nums; }
+.water-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
+.water-presets .chip { margin: 0; padding: 0; justify-content: center; min-height: 40px; }
+.done .water-presets .chip { background: rgba(0, 0, 0, 0.12); }
+.water { position: relative; }
+.water > .check { position: absolute; top: 14px; right: 14px; }
+.water-side .card-title, .water-side .card-sub { padding-right: 44px; }
+.water-custom { margin-top: 6px; }
+.water-custom .field { flex: 1; min-width: 56px; min-height: 44px; padding: 0 10px; }
+.water-custom .btn-add { flex: none; padding: 0 14px; min-height: 44px; font-size: 16px; }
+.closes-in { margin: 8px 0 0; font-size: 14px; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+.closes-in.soon { color: var(--warn); }
+.hint[hidden] { display: none; }
+
 /* ---- Photos ------------------------------------------------------------------ */
 
 .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

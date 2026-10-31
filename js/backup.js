@@ -9,9 +9,16 @@ const toDataUrl = (blob) => new Promise((resolve, reject) => {
   r.readAsDataURL(blob);
 });
 
+// What goes in a backup file: everything except the cloud link's secret and push
+// token. Whoever holds the secret can act as this phone, so it never leaves the device.
+export function backupState(state) {
+  if (!state.cloud) return state;
+  return { ...state, cloud: { url: state.cloud.url || '', appliedIds: state.cloud.appliedIds || [] } };
+}
+
 // Builds the file in pieces so a few dozen photos don't become one giant string.
 export async function exportBackup(state) {
-  const parts = [`{"app":"ironclad-75","format":1,"exportedAt":${JSON.stringify(new Date().toISOString())},"state":${JSON.stringify(state)},"photos":{`];
+  const parts = [`{"app":"ironclad-75","format":1,"exportedAt":${JSON.stringify(new Date().toISOString())},"state":${JSON.stringify(backupState(state))},"photos":{`];
   let count = 0;
   for (const key of (await store.photoKeys()).sort()) {
     const rec = await store.getPhoto(key);
@@ -31,6 +38,21 @@ export async function exportBackup(state) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   return { photos: count, bytes: blob.size };
+}
+
+// The state to save after a restore. Backups carry no cloud secret, so a phone that
+// was connected comes back marked "needs re-link" (Settings asks for it). Backups
+// made by older versions still contain the secret and keep working.
+export function restoredState(saved) {
+  const restored = { ...saved };
+  delete restored.reminders; // from older versions
+  const cloud = restored.cloud;
+  if (cloud) {
+    restored.cloud = cloud.secret
+      ? { ...cloud, pushToken: null }
+      : { url: cloud.url || '', secret: '', pushToken: null, appliedIds: cloud.appliedIds || [], needsRelink: !!cloud.url };
+  }
+  return restored;
 }
 
 export async function readBackup(file) {
@@ -53,11 +75,7 @@ export async function restoreBackup(data) {
   for (const [key, url] of Object.entries(photos)) {
     await store.putPhoto(key, await (await fetch(url)).blob());
   }
-  // The cloud link carries over; this phone registers its own push token on launch.
-  const restored = { ...data.state };
-  delete restored.reminders; // from older versions
-  if (restored.cloud) restored.cloud = { ...restored.cloud, pushToken: null };
-  await store.saveState(restored);
+  await store.saveState(restoredState(data.state));
   for (const key of await store.photoKeys()) {
     if (!(key in photos)) await store.deletePhoto(key);
   }

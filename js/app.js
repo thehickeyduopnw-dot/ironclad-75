@@ -76,6 +76,10 @@ async function init() {
   }, 60000);
 
   setInterval(() => tick(false), 20000);
+  // Running workout timers and the "Day closes in" countdown.
+  setInterval(() => { if (tab === 'today' && !document.hidden) updateTimers(); }, 1000);
+  setInterval(() => { if (tab === 'today' && !document.hidden) updateCountdown(); }, 30000);
+  if (state.cloud.needsRelink && !clock.isDebug) toast('Backup restored. Reconnect Cloud & Muse in Settings to keep syncing.');
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(true); });
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
@@ -125,21 +129,28 @@ const syncSoon = () => { if (cloudOn()) cloud.scheduleSync(state.cloud, cloudHoo
 const syncNow = () => cloud.syncNow(state.cloud, cloudHooks);
 
 // Changes Muse made through the API. Each is checked against the same rules as a tap
-// (only open days of an active run), applied once, and acknowledged.
+// (only open days of an active run) and applied at most once. Returns which ids were
+// applied and which were rejected (e.g. the day had closed), for the acknowledgement.
 function applyRemoteChanges(changes) {
   const seen = new Set(state.cloud.appliedIds || []);
-  const ids = [];
+  const applied = [];
+  const rejected = [];
   const logged = [];
   for (const ch of changes) {
-    ids.push(ch.id);
-    if (seen.has(ch.id)) continue;
-    seen.add(ch.id);
+    if (seen.has(ch.id)) { applied.push(ch.id); continue; }
+    let ok = true;
     if (ch.type === 'reminder' && ch.reminder) {
       state = { ...state, settings: { ...state.settings, reminderTime: ch.reminder.time, reminderPush: ch.reminder.enabled } };
       logged.push('reminder');
     } else if (ch.type === 'log') {
-      const res = updateDay(ch.date, (d) => C.applyApiTasks(d, ch.tasks, C.lastReadingTitle(state, ch.date)), { quiet: true, at: ch.created_at });
-      if (res.applied) logged.push(...Object.keys(ch.tasks).map((k) => k.replace('_', ' ')));
+      ok = updateDay(ch.date, (d) => C.applyApiTasks(d, ch.tasks, C.lastReadingTitle(state, ch.date)), { quiet: true, at: ch.created_at }).applied;
+      if (ok) logged.push(...Object.keys(ch.tasks).map((k) => k.replace('_', ' ')));
+    }
+    if (ok) {
+      seen.add(ch.id);
+      applied.push(ch.id);
+    } else {
+      rejected.push(ch.id);
     }
   }
   state = { ...state, cloud: { ...state.cloud, appliedIds: [...seen].slice(-300) } };
@@ -148,7 +159,7 @@ function applyRemoteChanges(changes) {
     render();
     toast(`Updated from Muse: ${[...new Set(logged)].join(', ')}`);
   }
-  return ids;
+  return { applied, rejected };
 }
 
 function cloudPayload() {
@@ -164,6 +175,7 @@ function cloudPayload() {
     }
   }
   const st = C.computeStats(state, now);
+  const lastReset = [...state.attempts].reverse().find((r) => r.result === 'reset');
   return {
     progress: {
       start_date: a?.startDate ?? null,
@@ -171,10 +183,14 @@ function cloudPayload() {
       total_days_completed: st.currentStreak,
       longest_streak: st.longestStreak,
       attempt: a?.status === 'completed' ? state.attempts.length : state.attempts.length + 1,
+      attempts: st.attempts,
+      last_reset_date: lastReset?.endDate ?? null,
+      last_reset_missing: lastReset?.missing ?? null,
       tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
       grace_hour: state.settings.graceHour,
     },
     days,
+    applied_ids: (state.cloud.appliedIds || []).slice(-100),
     reminder: { time: state.settings.reminderTime, enabled: state.settings.reminderPush !== false },
   };
 }
@@ -270,6 +286,7 @@ function renderToday() {
       <div class="hero-top"><span class="eyebrow">Attempt #${attemptNumber()}</span><span class="eyebrow">${fmtDate(viewKey)}</span></div>
       <div class="daynum"><span class="day-label">Day</span><span class="num">${n}</span><span class="of">of ${C.TOTAL_DAYS}</span></div>
       <div class="run-bar" aria-hidden="true"><span id="run-fill"></span></div>
+      <p id="closes-in" class="closes-in"></p>
     </header>
     ${yesterday ? graceSwitch(a, today, yesterday) : ''}
     ${eveningBanner(now, today)}
@@ -283,7 +300,63 @@ function eveningBanner(now, today) {
   const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
   const left = C.missingTasks(state.days[today]).length;
   if (!left || hhmm < state.settings.reminderTime) return '';
-  return `<div class="banner" role="status"><b>${left} task${left === 1 ? '' : 's'} left</b> · it's after ${fmtTime(state.settings.reminderTime)}, finish before midnight.</div>`;
+  return `<div class="banner" role="status"><b>${left} task${left === 1 ? '' : 's'} left</b> · day closes in ${untilClose(today, now)}.</div>`;
+}
+
+// When a day stops being editable: midnight after it, plus the grace window.
+function closeTime(key) {
+  const t = C.parseKey(C.addDays(key, 1));
+  t.setHours(state.settings.graceHour, 0, 0, 0);
+  return t;
+}
+
+// "HH:MM" left until the day closes.
+function untilClose(key, now = clock.now()) {
+  const mins = Math.max(0, Math.floor((closeTime(key) - now) / 60000));
+  return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+}
+
+function updateCountdown() {
+  const el = screen.querySelector('#closes-in');
+  if (!el || !viewKey) return;
+  const now = clock.now();
+  const complete = C.isDayComplete(state.days[viewKey]);
+  const soon = closeTime(viewKey) - now < 3600e3;
+  el.className = `closes-in ${!complete && soon ? 'soon' : ''}`;
+  el.textContent = complete ? `Day closes in ${untilClose(viewKey, now)} · all done` : `Day closes in ${untilClose(viewKey, now)}`;
+}
+
+// Live "mm:ss" on running workout timers.
+function updateTimers() {
+  for (const el of screen.querySelectorAll('[data-since]')) {
+    const secs = Math.max(0, Math.floor((clock.now() - Date.parse(el.dataset.since)) / 1000));
+    el.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+  }
+}
+
+const fmtClock = (iso) => new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+
+function workoutSub(w) {
+  if (C.workoutRunning(w)) return `Running · started ${fmtClock(w.startedAt)}`;
+  if (w.done && w.minutes != null) {
+    const span = w.startedAt && w.endedAt ? ` · ${fmtClock(w.startedAt)}–${fmtClock(w.endedAt)}` : '';
+    return `${w.minutes} min${span}${w.minutes < C.WORKOUT_MINUTES ? ` (under ${C.WORKOUT_MINUTES})` : ''}`;
+  }
+  if (w.done) return `${C.WORKOUT_MINUTES} minutes · logged without timer`;
+  return `${C.WORKOUT_MINUTES} minutes`;
+}
+
+function workoutTimer(id, w) {
+  if (w.done) return '';
+  if (C.workoutRunning(w)) {
+    return `<div class="workout-timer">
+      <span class="elapsed" data-since="${w.startedAt}">0:00</span>
+      <button class="chip timer on" data-action="wk-finish" data-id="${id}">Finish</button>
+      <button class="chip" data-action="wk-cancel" data-id="${id}" aria-label="Cancel timer">Cancel</button>
+    </div>`;
+  }
+  return `<div class="workout-timer"><button class="chip timer" data-action="wk-start" data-id="${id}">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>Start timer</button></div>`;
 }
 
 // During the grace window both yesterday and today can be edited.
@@ -321,12 +394,15 @@ function taskCards(day) {
 
   const workout = (id, label) => `
     <div class="card workout ${s[id] ? 'done' : ''}" data-task="${id}">
-      <button class="card-main" data-action="toggle" data-id="${id}" aria-pressed="${s[id]}">
-        <span class="card-text"><span class="card-title">${label}</span><span class="card-sub">45 minutes</span></span>${CHECK}
-      </button>
-      <button class="chip ${day[id].outdoor ? 'on' : ''}" data-action="outdoor" data-id="${id}" aria-pressed="${day[id].outdoor}">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
-        Outdoor</button>
+      <div class="workout-top">
+        <button class="card-main" data-action="toggle" data-id="${id}" aria-pressed="${s[id]}">
+          <span class="card-text"><span class="card-title">${label}</span><span class="card-sub">${workoutSub(day[id])}</span></span>${CHECK}
+        </button>
+        <button class="chip ${day[id].outdoor ? 'on' : ''}" data-action="outdoor" data-id="${id}" aria-pressed="${day[id].outdoor}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+          Outdoor</button>
+      </div>
+      ${workoutTimer(id, day[id])}
     </div>`;
 
   const toggle = (id, label, sub) => `
@@ -338,6 +414,7 @@ function taskCards(day) {
     ${workout('workout1', 'Workout #1')}
     ${workout('workout2', 'Workout #2')}
     <p id="outdoor-hint" class="hint"></p>
+    <p id="gap-hint" class="hint bad" hidden>Workouts look back to back: the two can't be done consecutively. Leave at least ${C.MIN_WORKOUT_GAP_MIN} minutes between them.</p>
     ${toggle('diet', 'Follow diet', dietSub())}
     ${toggle('alcohol', 'No alcohol', 'Zero drinks today')}
 
@@ -351,10 +428,14 @@ function taskCards(day) {
       </button>
       <div class="water-side">
         <span class="card-title">Water</span>
-        <span class="card-sub">${Math.floor(day.water / C.WATER_STEP_OZ)} of ${C.WATER_GOAL_OZ / C.WATER_STEP_OZ} × 16 oz</span>
-        <div class="row">
-          <button class="btn-add" data-action="water-add">+16 oz</button>
-          <button class="btn-icon" data-action="water-sub" aria-label="Remove 16 ounces" ${day.water ? '' : 'disabled'}>−</button>
+        <span class="card-sub">${Math.max(0, C.WATER_GOAL_OZ - day.water)} oz to go</span>
+        <div class="water-presets">
+          ${[8, 12, 16, 32].map((oz) => `<button class="chip" data-action="water-add" data-oz="${oz}">+${oz}</button>`).join('')}
+        </div>
+        <div class="row water-custom">
+          <input class="field" id="water-custom" type="number" inputmode="numeric" min="1" max="${C.MAX_WATER_OZ}" placeholder="oz" aria-label="Custom amount in ounces">
+          <button class="btn-add" data-action="water-custom">Add</button>
+          <button class="btn-icon" data-action="water-sub" aria-label="Undo last water" ${day.water ? '' : 'disabled'}>−</button>
         </div>
       </div>
       ${CHECK}
@@ -405,6 +486,10 @@ function patchToday() {
       : anyOutdoorMarked ? 'Finish the outdoor workout to count it'
       : 'One workout must be outdoors: tap Outdoor';
   }
+  const gap = screen.querySelector('#gap-hint');
+  if (gap) gap.hidden = !C.workoutsBackToBack(day);
+  updateCountdown();
+  updateTimers();
 
   const status = screen.querySelector('#status');
   if (status) {
@@ -789,6 +874,7 @@ function openLightbox(key) {
 const README_URL = 'https://github.com/thehickeyduopnw-dot/ironclad-75#cloud-backend-and-muse-api';
 let freshApiKey = null; // shown once after generating, then forgotten
 let apiKeyInfo = null; // { active, created_at } from the backend
+let relinkBlocked = false; // Connect was refused: the backend is linked to another phone
 
 function remindersGroup() {
   const pushReady = cloudOn() && state.cloud.pushToken;
@@ -809,10 +895,18 @@ function remindersGroup() {
 function cloudGroup() {
   if (clock.isDebug) return '<div class="group"><h3>Cloud &amp; Muse</h3><p class="muted pad-y">Turned off in test mode.</p></div>';
   if (!cloud.linked(state.cloud)) {
+    const relink = state.cloud.needsRelink
+      ? '<p class="warn-text pad-y">Restored from a backup. Backups don\'t include the cloud link, so tap Connect to re-link this phone.</p>'
+      : '';
+    // The backend only accepts the first phone; a restored or new phone needs the old link cleared.
+    const blocked = relinkBlocked
+      ? `<p class="pad-y fine">The backend is still linked to your previous phone. In Supabase, open <b>Table Editor → kv</b>, delete the <code>app_secret</code> row, then tap Connect again. Your data and API key stay as they are.</p>`
+      : '';
     return `<div class="group"><h3>Cloud &amp; Muse</h3>
+      ${relink}${blocked}
       <div class="setting col">
         <label for="cloud-url">Backend address</label>
-        <input id="cloud-url" class="field" type="url" inputmode="url" autocomplete="off" placeholder="https://xxxx.supabase.co/functions/v1/ironclad">
+        <input id="cloud-url" class="field" type="url" inputmode="url" autocomplete="off" placeholder="https://xxxx.supabase.co/functions/v1/ironclad" value="${esc(state.cloud.url || '')}">
         <button class="btn-primary" data-action="cloud-link">Connect</button>
         <small class="muted">Syncs your daily log so Muse can read it and log tasks for you, and enables push notifications. Your photos stay on the phone. One-time setup: <a href="${README_URL}" target="_blank" rel="noopener">guide</a>.</small>
       </div></div>`;
@@ -857,6 +951,7 @@ function backupGroup() {
   return `<div class="group">
     <h3>Backup</h3>
     <p class="muted pad-y">Everything lives only on this phone. Export a backup (photos included) every week or so and keep it somewhere safe, like Google Drive.</p>
+    <p class="muted fine pad-b">Backups don't include the Cloud &amp; Muse link (it's a secret that lets a device act as this phone). After restoring, reconnect in Cloud &amp; Muse.</p>
     <div class="row pad-b">
       <button class="btn-secondary grow" data-action="export">Export backup</button>
       <label class="btn-secondary grow file-btn">Import backup<input class="visually-hidden" type="file" accept="application/json,.json" data-field="import"></label>
@@ -981,13 +1076,47 @@ function showToday() {
   window.scrollTo(0, 0);
 }
 
+let lastWaterAdd = 0;
+
+function addWater(oz) {
+  lastWaterAdd = oz;
+  const { gained } = updateDay(viewKey, (d) => { d.water = Math.min(d.water + oz, C.MAX_WATER_OZ); });
+  if (!gained.length) fx.smallStep();
+}
+
+function finishWorkout(w) {
+  const now = clock.now().toISOString();
+  w.done = true;
+  if (w.startedAt) {
+    w.endedAt = now;
+    w.minutes = C.elapsedMinutes(w.startedAt, now);
+  }
+}
+
 const actions = {
   toggle(el) {
     const id = el.dataset.id;
     updateDay(viewKey, (d) => {
-      if (id === 'workout1' || id === 'workout2') d[id].done = !d[id].done;
-      else d[id] = !d[id];
+      if (id !== 'workout1' && id !== 'workout2') {
+        d[id] = !d[id];
+        return;
+      }
+      const w = d[id];
+      if (C.workoutRunning(w)) return finishWorkout(w); // tapping a running workout finishes it
+      w.done = !w.done;
+      if (!w.done) Object.assign(w, { startedAt: null, endedAt: null, minutes: null });
     });
+  },
+  'wk-start'(el) {
+    const now = clock.now().toISOString();
+    updateDay(viewKey, (d) => { Object.assign(d[el.dataset.id], { startedAt: now, endedAt: null, minutes: null }); });
+    fx.smallStep();
+  },
+  'wk-finish'(el) {
+    updateDay(viewKey, (d) => finishWorkout(d[el.dataset.id]));
+  },
+  'wk-cancel'(el) {
+    updateDay(viewKey, (d) => { Object.assign(d[el.dataset.id], { startedAt: null, endedAt: null, minutes: null }); });
   },
   outdoor(el) {
     const id = el.dataset.id;
@@ -999,12 +1128,19 @@ const actions = {
     });
     fx.smallStep();
   },
-  'water-add'() {
-    const { gained } = updateDay(viewKey, (d) => { d.water = Math.min(d.water + C.WATER_STEP_OZ, C.WATER_GOAL_OZ * 2); });
-    if (!gained.length) fx.smallStep();
+  'water-add'(el) {
+    addWater(Number(el.dataset.oz) || C.WATER_STEP_OZ);
   },
+  'water-custom'() {
+    const oz = Math.round(Number(document.getElementById('water-custom')?.value));
+    if (!(oz > 0 && oz <= C.MAX_WATER_OZ)) return toast(`Enter an amount from 1 to ${C.MAX_WATER_OZ} oz.`);
+    addWater(oz);
+  },
+  // "−" undoes the last amount added (16 oz if nothing was added this session).
   'water-sub'() {
-    updateDay(viewKey, (d) => { d.water = Math.max(0, d.water - C.WATER_STEP_OZ); });
+    const oz = lastWaterAdd || C.WATER_STEP_OZ;
+    lastWaterAdd = 0;
+    updateDay(viewKey, (d) => { d.water = Math.max(0, d.water - oz); });
   },
   'pages-add'() { updateDay(viewKey, (d) => { d.reading.pages += 1; }); },
   'pages-sub'() { updateDay(viewKey, (d) => { d.reading.pages = Math.max(0, d.reading.pages - 1); }); },
@@ -1034,8 +1170,19 @@ const actions = {
   },
   'cloud-link'(el) {
     busy(el, 'Connecting…', async () => {
-      const linkedCloud = await cloud.link(document.getElementById('cloud-url').value.trim());
-      state = { ...state, cloud: linkedCloud };
+      let linkedCloud;
+      try {
+        linkedCloud = await cloud.link(document.getElementById('cloud-url').value.trim());
+      } catch (err) {
+        if (/already linked/i.test(err.message)) {
+          relinkBlocked = true;
+          render();
+          throw new Error('The backend is still linked to your previous phone. See the steps in Cloud & Muse.');
+        }
+        throw err;
+      }
+      relinkBlocked = false;
+      state = { ...state, cloud: { ...linkedCloud, appliedIds: state.cloud.appliedIds || [] } };
       save();
       await syncNow();
       const token = await refreshPushToken(true).catch(() => null);

@@ -61,10 +61,13 @@ export function openKeys(now, graceHour) {
 
 // ---- Days and tasks ----------------------------------------------------
 
+// Workouts may carry timer data: startedAt/endedAt (ISO times) and minutes.
+// All three stay null for a workout checked off by hand.
 export function emptyDay() {
+  const workout = () => ({ done: false, outdoor: false, startedAt: null, endedAt: null, minutes: null });
   return {
-    workout1: { done: false, outdoor: false },
-    workout2: { done: false, outdoor: false },
+    workout1: workout(),
+    workout2: workout(),
     diet: false,
     alcohol: false,
     water: 0,
@@ -117,6 +120,28 @@ export function isDayComplete(day) {
   return missingTasks(day).length === 0;
 }
 
+// ---- Workout timing -----------------------------------------------------
+
+export const WORKOUT_MINUTES = 45;
+// The two workouts can't be back to back. Less than this gap between the end of the
+// first and the start of the second gets a warning on the day view.
+export const MIN_WORKOUT_GAP_MIN = 60;
+
+export const elapsedMinutes = (fromIso, toIso) => Math.max(0, Math.round((Date.parse(toIso) - Date.parse(fromIso)) / 60000));
+
+export function workoutRunning(w) {
+  return !!w?.startedAt && !w.endedAt && !w.done;
+}
+
+// True when timed workouts are back to back (or overlap). Needs the first
+// workout's end and the second one's start; untimed workouts never warn.
+export function workoutsBackToBack(day) {
+  const d = normalizeDay(day);
+  const [first, second] = [d.workout1, d.workout2].filter((w) => w.startedAt).sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+  if (!first?.endedAt || !second) return false;
+  return Date.parse(second.startedAt) - Date.parse(first.endedAt) < MIN_WORKOUT_GAP_MIN * 60000;
+}
+
 // ---- State -------------------------------------------------------------
 
 export function defaultState() {
@@ -148,9 +173,19 @@ export function lastReadingTitle(state, beforeKey) {
   return '';
 }
 
+// Where a new run starts after a reset on `failedKey`: the next day, when that day
+// is still open (the grace window) and already complete, so it counts as Day 1.
+// Otherwise today. (Starting on a closed or unfinished next day would just set off
+// another reset.)
+export function restartKey(state, failedKey, now) {
+  const next = addDays(failedKey, 1);
+  if (openKeys(now, state.settings.graceHour).includes(next) && isDayComplete(state.days[next])) return next;
+  return dateKey(now);
+}
+
 // Check every closed day of the current run. The first incomplete day ends the run
-// and a new one starts today; finishing day 75 completes it. Returns a new state
-// (or the same object when nothing changed) plus the event to show, if any.
+// and a new one starts (see restartKey); finishing day 75 completes it. Returns a new
+// state (or the same object when nothing changed) plus the event to show, if any.
 export function evaluate(state, now) {
   const a = state.attempt;
   if (!a || a.status !== 'active') return { state, event: null };
@@ -171,7 +206,7 @@ export function evaluate(state, now) {
       };
       const event = { type: 'reset', ...record, attemptNumber: state.attempts.length + 1 };
       return {
-        state: { ...state, attempts: [...state.attempts, record], attempt: newAttempt(dateKey(now)), pendingEvent: event },
+        state: { ...state, attempts: [...state.attempts, record], attempt: newAttempt(restartKey(state, d, now)), pendingEvent: event },
         event,
       };
     }
@@ -298,6 +333,15 @@ export function toApiDay(raw, key, dayNumber) {
   const d = normalizeDay(raw);
   const s = taskState(d);
   const t = (id) => ({ done: s[id], done_at: s[id] ? d.doneAt?.[id] ?? null : null });
+  // minutes is the timed length, or null when the workout wasn't timed.
+  const workout = (id) => ({
+    ...t(id),
+    minutes: d[id].minutes ?? null,
+    target_minutes: WORKOUT_MINUTES,
+    started_at: d[id].startedAt ?? null,
+    ended_at: d[id].endedAt ?? null,
+    outdoor: d[id].outdoor,
+  });
   return {
     date: key,
     day_number: dayNumber,
@@ -305,8 +349,8 @@ export function toApiDay(raw, key, dayNumber) {
     outdoor_rule_met: s.outdoor,
     logged_off_app: !!raw?.manual,
     tasks: {
-      workout_1: { ...t('workout1'), minutes: 45, outdoor: d.workout1.outdoor },
-      workout_2: { ...t('workout2'), minutes: 45, outdoor: d.workout2.outdoor },
+      workout_1: workout('workout1'),
+      workout_2: workout('workout2'),
       diet: t('diet'),
       no_alcohol: t('alcohol'),
       water: { ...t('water'), oz: d.water, goal_oz: WATER_GOAL_OZ },
@@ -318,6 +362,7 @@ export function toApiDay(raw, key, dayNumber) {
 
 export const MAX_WATER_OZ = WATER_GOAL_OZ * 2;
 export const MAX_PAGES = 2000;
+export const MAX_WORKOUT_MINUTES = 600;
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, Math.round(n)));
 
 // Apply a logged change from the API (e.g. sent by Muse) to a day, in place.
@@ -327,11 +372,19 @@ export function applyApiTasks(d, tasks, lastTitle = '') {
   for (const [api, id, other] of [['workout_1', 'workout1', 'workout2'], ['workout_2', 'workout2', 'workout1']]) {
     const v = tasks[api];
     if (v === undefined) continue;
-    if (typeof flag(v) === 'boolean') d[id].done = flag(v);
+    const w = d[id];
+    if (typeof flag(v) === 'boolean') {
+      w.done = flag(v);
+      if (!w.done) { w.endedAt = null; w.minutes = null; }
+    }
     if (typeof v?.outdoor === 'boolean') {
-      d[id].outdoor = v.outdoor;
+      w.outdoor = v.outdoor;
       if (v.outdoor) d[other].outdoor = false; // only one needs to be the outdoor one
     }
+    if (typeof v?.started_at === 'string') w.startedAt = v.started_at;
+    if (typeof v?.ended_at === 'string') w.endedAt = v.ended_at;
+    if (typeof v?.minutes === 'number') w.minutes = clamp(v.minutes, 0, MAX_WORKOUT_MINUTES);
+    else if ((v?.started_at || v?.ended_at) && w.startedAt && w.endedAt) w.minutes = elapsedMinutes(w.startedAt, w.endedAt);
   }
   if (typeof flag(tasks.diet) === 'boolean') d.diet = flag(tasks.diet);
   if (typeof flag(tasks.no_alcohol) === 'boolean') d.alcohol = flag(tasks.no_alcohol);
@@ -340,6 +393,7 @@ export function applyApiTasks(d, tasks, lastTitle = '') {
     if (typeof w.oz === 'number') d.water = w.oz;
     if (typeof w.add_oz === 'number') d.water += w.add_oz;
     if (w.done === true) d.water = Math.max(d.water, WATER_GOAL_OZ);
+    if (w.done === false) d.water = Math.min(d.water, WATER_GOAL_OZ - WATER_STEP_OZ); // one step short
     d.water = clamp(d.water, 0, MAX_WATER_OZ);
   }
   const r = tasks.reading;
@@ -348,6 +402,7 @@ export function applyApiTasks(d, tasks, lastTitle = '') {
     if (typeof r.pages === 'number') d.reading.pages = r.pages;
     if (typeof r.add_pages === 'number') d.reading.pages += r.add_pages;
     if (r.done === true) d.reading.pages = Math.max(d.reading.pages, PAGES_GOAL);
+    if (r.done === false) d.reading.pages = Math.min(d.reading.pages, PAGES_GOAL - 1);
     d.reading.pages = clamp(d.reading.pages, 0, MAX_PAGES);
     if (!d.reading.title && lastTitle) d.reading.title = lastTitle;
   }

@@ -4,10 +4,11 @@
 // browser tests (tests/index.html) with a fake database and push sender.
 //
 // Who can call what:
-//   Muse (Authorization: Bearer <API key>)   GET /today, /summary, /history · POST /log, /reminder, /notify, /device-token
-//   The phone app (X-App-Secret header)        all of the above, plus POST /sync, /changes/ack, /api-key/* · GET /changes, /api-key
-//   Anyone                                     POST /link (only until the phone has linked) · /cron (sends at most
-//                                              one due reminder; returns no data)
+//   Muse (Authorization: Bearer <API key>)   GET /today, /summary, /history, /reminder · POST /log, /reminder, /notify
+//   The phone app (X-App-Secret header)        all of the above, plus POST /sync, /device-token, /changes/ack,
+//                                              /api-key/* · GET /changes, /api-key
+//   The cron job (X-Cron-Secret header)        /cron (sends at most one due reminder; returns no data)
+//   Anyone                                     POST /link (only until the phone has linked)
 //
 // Secrets (Edge Functions → Secrets): FIREBASE_SERVICE_ACCOUNT = the Firebase service account JSON.
 // SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided by Supabase automatically.
@@ -47,6 +48,14 @@ export function localDate(date, tz) {
   return { date: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
 }
 
+// A real calendar date in YYYY-MM-DD form (rejects e.g. 2026-02-30).
+export function isRealDate(s) {
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}
+
 function addDays(key, n) {
   const [y, m, d] = key.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
@@ -66,14 +75,15 @@ function dayNumberFor(progress, date) {
 // A day with nothing logged, in the same shape the phone syncs.
 export function emptyDay(date, dayNumber) {
   const task = () => ({ done: false, done_at: null });
+  const workout = () => ({ ...task(), minutes: null, target_minutes: 45, started_at: null, ended_at: null, outdoor: false });
   return {
     date,
     day_number: dayNumber,
     complete: false,
     outdoor_rule_met: false,
     tasks: {
-      workout_1: { ...task(), minutes: 45, outdoor: false },
-      workout_2: { ...task(), minutes: 45, outdoor: false },
+      workout_1: workout(),
+      workout_2: workout(),
       diet: task(),
       no_alcohol: task(),
       water: { ...task(), oz: 0, goal_oz: 128 },
@@ -84,49 +94,75 @@ export function emptyDay(date, dayNumber) {
 }
 
 // ---- Data views -------------------------------------------------------------------------
+// Stored days are exactly what the phone last synced. Muse's changes the phone hasn't
+// confirmed yet are laid on top when answering (see withPending), so a change the phone
+// rejects simply disappears, and one it applied is never counted twice.
+
+export const STALE_AFTER_MIN = 180;
 
 async function context(env) {
   const progress = await env.db.getKV('progress');
   const tz = progress?.tz || 'UTC';
-  return { progress, tz, today: localDate(env.now(), tz) };
+  const pending = ((await env.db.getKV('pending_changes')) || []).filter((c) => c.type === 'log');
+  return { progress, tz, pending, today: localDate(env.now(), tz) };
 }
 
-function dayView(row, date, progress) {
-  const n = dayNumberFor(progress, date);
-  const day = row ? { ...row } : emptyDay(date, n);
+// How fresh the phone's last sync is, so "nothing done" isn't trusted blindly.
+function freshness(env, progress) {
+  const synced = progress?.synced_at ? Date.parse(progress.synced_at) : NaN;
+  const ago = Number.isFinite(synced) ? Math.max(0, Math.floor((env.now().getTime() - synced) / 60000)) : null;
+  return { synced_at: progress?.synced_at ?? null, synced_minutes_ago: ago, stale: ago == null || ago > STALE_AFTER_MIN };
+}
+
+// A day as stored, plus pending Muse changes, numbered within the current run.
+function dayView(row, date, ctx, lastTitle) {
+  const n = dayNumberFor(ctx.progress, date);
+  let day = row ? structuredClone(row) : emptyDay(date, n);
+  for (const c of ctx.pending) if (c.date === date) day = applyLog(day, c.tasks, c.created_at, lastTitle);
   if (n != null) day.day_number = n;
+  day.in_run = n != null;
   return day;
 }
 
+async function dayWithPending(env, ctx, date) {
+  const rows = await env.db.getDays(date, date);
+  const title = ctx.pending.some((c) => c.date === date && c.tasks.reading) ? await lastTitleBefore(env, date) : null;
+  return dayView(rows[0]?.data, date, ctx, title);
+}
+
 async function todayView(env) {
-  const { progress, today } = await context(env);
-  const rows = await env.db.getDays(today.date, today.date);
-  return { ...dayView(rows[0]?.data, today.date, progress), synced_at: progress?.synced_at ?? null };
+  const ctx = await context(env);
+  return { ...(await dayWithPending(env, ctx, ctx.today.date)), ...freshness(env, ctx.progress) };
 }
 
 async function summaryView(env) {
-  const { progress, today } = await context(env);
-  const rows = await env.db.getDays(today.date, today.date);
+  const ctx = await context(env);
+  const { progress } = ctx;
+  const today = await dayWithPending(env, ctx, ctx.today.date);
   return {
     start_date: progress?.start_date ?? null,
-    current_day: dayNumberFor(progress, today.date),
+    current_day: dayNumberFor(progress, ctx.today.date),
     total_days_completed: progress?.total_days_completed ?? 0,
-    today_complete: !!rows[0]?.data?.complete,
+    today_complete: !!today.complete,
     status: progress?.status ?? 'not_synced',
-    synced_at: progress?.synced_at ?? null,
+    attempts: progress?.attempts ?? (progress ? 1 : 0),
+    last_reset_date: progress?.last_reset_date ?? null,
+    last_reset_missing: progress?.last_reset_missing ?? null,
+    ...freshness(env, progress),
   };
 }
 
 async function historyView(env, count) {
-  const { progress, today } = await context(env);
-  const from = addDays(today.date, -(count - 1));
-  const rows = new Map((await env.db.getDays(from, today.date)).map((r) => [r.date, r.data]));
+  const ctx = await context(env);
+  const from = addDays(ctx.today.date, -(count - 1));
+  const rows = new Map((await env.db.getDays(from, ctx.today.date)).map((r) => [r.date, r.data]));
+  const title = ctx.pending.some((c) => c.tasks.reading) ? await lastTitleBefore(env, ctx.today.date) : null;
   const days = [];
   for (let i = 0; i < count; i++) {
-    const date = addDays(today.date, -i);
-    days.push(dayView(rows.get(date), date, progress));
+    const date = addDays(ctx.today.date, -i);
+    days.push(dayView(rows.get(date), date, ctx, title));
   }
-  return { days, synced_at: progress?.synced_at ?? null };
+  return { days, ...freshness(env, ctx.progress) };
 }
 
 // ---- Push ---------------------------------------------------------------------------------
@@ -142,13 +178,13 @@ async function deliver(env, data) {
 // Called every 5 minutes by the cron job. Sends at most one reminder per local day.
 export async function runReminder(env) {
   const reminder = await env.db.getKV('reminder');
-  const { progress, today } = await context(env);
+  const ctx = await context(env);
+  const { progress, today } = ctx;
   if (!reminder?.enabled) return 'off';
   if (today.time < (reminder.time || '20:00')) return 'waiting';
   if ((await env.db.getKV('reminder_last_sent')) === today.date) return 'already sent today';
   if (progress?.status !== 'active' || dayNumberFor(progress, today.date) == null) return 'no active run';
-  const rows = await env.db.getDays(today.date, today.date);
-  if (rows[0]?.data?.complete) return 'day complete';
+  if ((await dayWithPending(env, ctx, today.date)).complete) return 'day complete';
   const res = await deliver(env, { kind: 'reminder' }); // the phone writes the text from its own log
   if (res.status === 409) return 'no device';
   await env.db.setKV('reminder_last_sent', today.date);
@@ -156,14 +192,16 @@ export async function runReminder(env) {
 }
 
 // ---- Logging from Muse -----------------------------------------------------------------
-// Changes are applied here right away (so /today and the reminder see them) and queued
-// for the phone, which applies the same rules (applyApiTasks in js/challenge.js) on its
-// next sync. The phone's log stays the source of truth.
+// Changes are queued for the phone, which applies the same rules (applyApiTasks in
+// js/challenge.js) on its next sync. Until then the views lay them over the stored day.
+// The phone's log stays the source of truth.
 
 const GOAL_OZ = 128;
+const STEP_OZ = 16;
 const GOAL_PAGES = 10;
 const MAX_OZ = GOAL_OZ * 2;
 const MAX_PAGES = 2000;
+const MAX_WORKOUT_MINUTES = 600;
 const MAX_QUEUE = 200;
 const clampInt = (n, lo, hi) => Math.max(lo, Math.min(hi, Math.round(n)));
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -180,17 +218,25 @@ export function checkLogTasks(tasks) {
       case 'workout_1':
       case 'workout_2':
         if (!flagOk(v) || (typeof v === 'object' && v.outdoor !== undefined && typeof v.outdoor !== 'boolean')) return `${name} must be true/false or {"done": bool, "outdoor": bool}.`;
+        if (typeof v === 'object') {
+          if (v.minutes !== undefined && !(isNum(v.minutes) && v.minutes >= 0 && v.minutes <= MAX_WORKOUT_MINUTES)) return `${name}.minutes must be a number from 0 to ${MAX_WORKOUT_MINUTES}.`;
+          for (const f of ['started_at', 'ended_at']) {
+            if (v[f] !== undefined && !(typeof v[f] === 'string' && Number.isFinite(Date.parse(v[f])))) return `${name}.${f} must be an ISO 8601 time.`;
+          }
+        }
         break;
       case 'diet':
       case 'no_alcohol':
         if (!flagOk(v)) return `${name} must be true/false or {"done": bool}.`;
         break;
       case 'water':
-        if (!v || typeof v !== 'object' || !(isNum(v.oz) || isNum(v.add_oz) || v.done === true)) return 'water needs "oz", "add_oz" or "done": true.';
+        if (!v || typeof v !== 'object' || !(isNum(v.oz) || isNum(v.add_oz) || typeof v.done === 'boolean')) return 'water needs "oz", "add_oz" or "done": true/false.';
         if ((v.oz !== undefined && !isNum(v.oz)) || (v.add_oz !== undefined && !isNum(v.add_oz))) return 'water amounts must be numbers.';
+        if (v.done !== undefined && typeof v.done !== 'boolean') return 'water.done must be true or false.';
         break;
       case 'reading':
-        if (!v || typeof v !== 'object' || !(isNum(v.pages) || isNum(v.add_pages) || v.done === true || typeof v.title === 'string')) return 'reading needs "pages", "add_pages", "done": true or "title".';
+        if (!v || typeof v !== 'object' || !(isNum(v.pages) || isNum(v.add_pages) || typeof v.done === 'boolean' || typeof v.title === 'string')) return 'reading needs "pages", "add_pages", "done": true/false or "title".';
+        if (v.done !== undefined && typeof v.done !== 'boolean') return 'reading.done must be true or false.';
         if (v.title !== undefined && (typeof v.title !== 'string' || v.title.length > 200)) return 'reading.title must be text (up to 200 characters).';
         break;
       case 'progress_photo':
@@ -211,10 +257,20 @@ export function applyLog(day, tasks, nowIso, lastTitle = null) {
   for (const [name, other] of [['workout_1', 'workout_2'], ['workout_2', 'workout_1']]) {
     const v = tasks[name];
     if (v === undefined) continue;
-    if (typeof flag(v) === 'boolean') t[name].done = flag(v);
+    const w = t[name];
+    if (typeof flag(v) === 'boolean') {
+      w.done = flag(v);
+      if (!w.done) { w.ended_at = null; w.minutes = null; }
+    }
     if (typeof v?.outdoor === 'boolean') {
-      t[name].outdoor = v.outdoor;
+      w.outdoor = v.outdoor;
       if (v.outdoor) t[other].outdoor = false;
+    }
+    if (typeof v?.started_at === 'string') w.started_at = v.started_at;
+    if (typeof v?.ended_at === 'string') w.ended_at = v.ended_at;
+    if (isNum(v?.minutes)) w.minutes = clampInt(v.minutes, 0, MAX_WORKOUT_MINUTES);
+    else if ((v?.started_at || v?.ended_at) && w.started_at && w.ended_at) {
+      w.minutes = Math.max(0, Math.round((Date.parse(w.ended_at) - Date.parse(w.started_at)) / 60000));
     }
   }
   if (typeof flag(tasks.diet) === 'boolean') t.diet.done = flag(tasks.diet);
@@ -225,6 +281,7 @@ export function applyLog(day, tasks, nowIso, lastTitle = null) {
     if (isNum(w.oz)) oz = w.oz;
     if (isNum(w.add_oz)) oz += w.add_oz;
     if (w.done === true) oz = Math.max(oz, GOAL_OZ);
+    if (w.done === false) oz = Math.min(oz, GOAL_OZ - STEP_OZ); // one step short
     t.water.oz = clampInt(oz, 0, MAX_OZ);
   }
   t.water.done = t.water.oz >= GOAL_OZ;
@@ -235,6 +292,7 @@ export function applyLog(day, tasks, nowIso, lastTitle = null) {
     if (isNum(r.pages)) pages = r.pages;
     if (isNum(r.add_pages)) pages += r.add_pages;
     if (r.done === true) pages = Math.max(pages, GOAL_PAGES);
+    if (r.done === false) pages = Math.min(pages, GOAL_PAGES - 1);
     t.reading.pages = clampInt(pages, 0, MAX_PAGES);
     if (!t.reading.title && lastTitle) t.reading.title = lastTitle;
   }
@@ -278,7 +336,13 @@ export async function handle(req, env) {
 
   try {
     if (route === 'GET /') return json({ service: 'ironclad-75', ok: true });
-    if (path === '/cron') return json({ result: await runReminder(env) });
+    if (path === '/cron') {
+      // The cron job sends a secret the database generated (kv "cron_secret"; see supabase/cron.sql).
+      const saved = (await env.db.getKV('cron_secret'))?.secret;
+      const given = req.headers.get('X-Cron-Secret') || url.searchParams.get('secret');
+      if (!saved || given !== saved) return fail(401, 'Missing or invalid cron secret.');
+      return json({ result: await runReminder(env) });
+    }
 
     if (route === 'POST /link') {
       if (await env.db.getKV('app_secret')) return fail(403, 'This backend is already linked to a phone.');
@@ -319,6 +383,9 @@ export async function handle(req, env) {
         return res.ok ? json({ ok: true, sent: true }) : fail(res.status === 409 ? 409 : 502, res.error || 'Push service error.');
       }
       case 'POST /device-token': {
+        // Only the phone itself can say where notifications go.
+        const denied = needApp();
+        if (denied) return denied;
         const { token, platform = 'android' } = body;
         if (typeof token !== 'string' || token.length < 20 || token.length > 4096) return fail(400, 'token is required.');
         await env.db.setKV('device', { token, platform: String(platform).slice(0, 20), updated_at: env.now().toISOString() });
@@ -327,17 +394,23 @@ export async function handle(req, env) {
       case 'POST /sync': {
         const denied = needApp();
         if (denied) return denied;
-        const days = Array.isArray(body.days) ? body.days.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d?.date)) : [];
+        const days = Array.isArray(body.days) ? body.days : [];
         if (days.length > 400) return fail(400, 'Too many days in one sync.');
-        // Muse changes the phone hasn't picked up yet stay visible on top of its copy.
-        const pending = ((await env.db.getKV('pending_changes')) || []).filter((c) => c.type === 'log');
-        const rows = days.map((d) => {
-          let data = d;
-          for (const c of pending) if (c.date === d.date) data = applyLog(data, c.tasks, c.created_at);
-          return { date: d.date, day_number: d.day_number ?? null, data, updated_at: env.now().toISOString() };
-        });
-        if (rows.length) await env.db.upsertDays(rows);
-        if (body.progress) await env.db.setKV('progress', { ...body.progress, synced_at: env.now().toISOString() });
+        const bad = days.find((d) => !isRealDate(d?.date));
+        if (bad) return fail(400, `Invalid day date: ${JSON.stringify(bad?.date ?? null)}.`);
+        const nowIso = env.now().toISOString();
+        if (days.length) {
+          await env.db.upsertDays(days.map((d) => ({ date: d.date, day_number: d.day_number ?? null, data: d, updated_at: nowIso })));
+        }
+        // Changes the phone has applied are now in its copy: stop laying them on top,
+        // even if their acknowledgement got lost.
+        const applied = new Set(Array.isArray(body.applied_ids) ? body.applied_ids : []);
+        if (applied.size) {
+          const queue = (await env.db.getKV('pending_changes')) || [];
+          const left = queue.filter((c) => !applied.has(c.id));
+          if (left.length !== queue.length) await env.db.setKV('pending_changes', left);
+        }
+        if (body.progress) await env.db.setKV('progress', { ...body.progress, synced_at: nowIso });
         if (body.reminder) await env.db.setKV('reminder', { time: body.reminder.time || '20:00', enabled: !!body.reminder.enabled });
         return json({ ok: true, days: days.length });
       }
@@ -351,14 +424,13 @@ export async function handle(req, env) {
         if (problem) return fail(400, problem);
         const dayNumber = dayNumberFor(progress, date);
         if (progress?.status !== 'active' || dayNumber == null) return fail(409, 'There is no active challenge run on that date.');
-        const nowIso = env.now().toISOString();
-        const change = { id: randomSecret('chg_').slice(0, 24), type: 'log', date, tasks: body.tasks, created_at: nowIso };
+        const change = { id: randomSecret('chg_').slice(0, 24), type: 'log', date, tasks: body.tasks, created_at: env.now().toISOString() };
         if (!(await queueChange(env, change))) return fail(429, 'Too many changes waiting for the phone. Open the app to sync.');
-        const rows = await env.db.getDays(date, date);
-        const current = dayView(rows[0]?.data, date, progress);
-        const updated = applyLog(current, body.tasks, nowIso, await lastTitleBefore(env, date));
-        await env.db.upsertDays([{ date, day_number: dayNumber, data: updated, updated_at: nowIso }]);
-        return json({ ok: true, change_id: change.id, day: updated });
+        return json({ ok: true, change_id: change.id, day: await dayWithPending(env, await context(env), date) });
+      }
+      case 'GET /reminder': {
+        const r = (await env.db.getKV('reminder')) || { time: '20:00', enabled: true };
+        return json({ time: r.time || '20:00', enabled: r.enabled !== false });
       }
       case 'POST /reminder': {
         const current = (await env.db.getKV('reminder')) || { time: '20:00', enabled: true };
@@ -381,9 +453,11 @@ export async function handle(req, env) {
       case 'POST /changes/ack': {
         const denied = needApp();
         if (denied) return denied;
-        const ids = new Set(Array.isArray(body.ids) ? body.ids : []);
+        // ids: applied on the phone. rejected: the phone refused them (e.g. the day had
+        // closed). Both leave the queue; rejected ones simply stop showing in the views.
+        const done = new Set([...(Array.isArray(body.ids) ? body.ids : []), ...(Array.isArray(body.rejected) ? body.rejected : [])]);
         const queue = (await env.db.getKV('pending_changes')) || [];
-        await env.db.setKV('pending_changes', queue.filter((c) => !ids.has(c.id)));
+        await env.db.setKV('pending_changes', queue.filter((c) => !done.has(c.id)));
         return json({ ok: true });
       }
       case 'GET /api-key': {

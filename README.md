@@ -35,7 +35,7 @@ One-time setup, about 15 minutes, all in the browser:
 2. **SQL Editor:** paste [`supabase/setup.sql`](supabase/setup.sql) and click **Run**.
 3. **Edge Functions → Deploy a new function → Via Editor.** Name it exactly `ironclad`, replace the sample code with the whole of [`supabase/functions/ironclad/index.ts`](supabase/functions/ironclad/index.ts) (use GitHub's **Raw** button to copy it), and click **Deploy**.
 4. Open the function's **Details/Settings** and turn **off** "Verify JWT" ("Enforce JWT verification"). The function checks your own API key instead; with this on, Supabase blocks Muse's requests.
-5. **Integrations → Cron → Create job:** every 5 minutes (`*/5 * * * *`), type **Supabase Edge Function**, function `ironclad`, method **POST**, path/URL ending in `/ironclad/cron`. (Or run [`supabase/cron.sql`](supabase/cron.sql) with your project ref filled in.)
+5. **Schedule (SQL Editor):** run [`supabase/cron.sql`](supabase/cron.sql) with your project ref filled in. It checks for reminders every 5 minutes and sends a random secret the database makes for itself, so the reminder URL alone can't trigger anything.
 
 **Firebase (push notifications only)**
 

@@ -48,7 +48,7 @@ export function lastSync() {
 // Debounced background sync. Never throws; failures just wait for the next change,
 // the next launch, or the connection coming back.
 // `hooks.payload()` builds what to upload; `hooks.apply(changes)` applies Muse's
-// changes to the local log and returns the ids it handled.
+// changes to the local log and returns { applied, rejected } ids.
 export function scheduleSync(cloud, hooks, delay = 2500) {
   if (!linked(cloud)) return;
   clearTimeout(timer);
@@ -70,13 +70,14 @@ export async function syncNow(cloud, hooks) {
   }
 }
 
-// Returns how many changes were applied. The phone remembers applied ids, so a
-// change is never applied twice even if the acknowledgement gets lost.
+// Returns how many changes were handled. The phone remembers applied ids (and sends
+// them with each sync), so a change is never applied or counted twice even if the
+// acknowledgement gets lost. Rejected ones are reported so the server drops them.
 export async function pullChanges(cloud, hooks) {
   const { changes = [] } = await app(cloud, '/changes', { method: 'GET' });
   if (!changes.length) return 0;
-  const ids = hooks.apply(changes);
-  await app(cloud, '/changes/ack', { body: { ids } });
+  const { applied, rejected } = hooks.apply(changes);
+  await app(cloud, '/changes/ack', { body: { ids: applied, rejected } });
   return changes.length;
 }
 
