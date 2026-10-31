@@ -410,6 +410,11 @@ select {
 .closes-in.soon { color: var(--warn); }
 .hint[hidden] { display: none; }
 .ios-install { margin-top: 18px; font-size: 15px; }
+.photo-top { display: flex; align-items: center; gap: 14px; padding: 14px 18px 10px; }
+.photo-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 14px 14px; }
+.photo-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 48px; margin: 0; cursor: pointer; font-size: 15px; font-weight: 800; text-align: center; }
+.photo-btn .cam { width: 20px; height: 20px; }
+.done .photo-btn.chip { background: rgba(0, 0, 0, 0.12); }
 /* iPhone home-screen apps draw under the status bar, whose text is always white
    (black-translucent): keep a dark strip behind it so light mode stays readable. */
 body::after {

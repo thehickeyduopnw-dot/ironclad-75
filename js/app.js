@@ -35,6 +35,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 const fmtDate = (key, opts = { weekday: 'short', month: 'short', day: 'numeric' }) => C.parseKey(key).toLocaleDateString(undefined, opts);
 const graceLabel = (h) => (h === 0 ? 'midnight' : `${h}:00 AM`);
 const CHECK = '<span class="check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>';
+const CAMERA_ICON = '<svg class="cam" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
 
 // ---- Startup -------------------------------------------------------------
 
@@ -455,11 +456,17 @@ function taskCards(day) {
     </div>
 
     <div class="card photo ${s.photo ? 'done' : ''}" data-task="photo">
-      <label class="card-main photo-pick">
-        <input class="visually-hidden" type="file" accept="image/*" data-field="photo">
-        <span class="thumb-wrap">${day.photo ? `<img class="thumb" data-photo-key="${viewKey}" alt="Progress photo">` : '<svg class="cam" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>'}</span>
-        <span class="card-text"><span class="card-title">Progress photo</span><span class="card-sub">${day.photo ? 'Tap to retake' : 'Tap to take or choose'}</span></span>${CHECK}
-      </label>
+      <div class="photo-top">
+        <span class="thumb-wrap">${day.photo ? `<img class="thumb" data-photo-key="${viewKey}" alt="Progress photo">` : CAMERA_ICON}</span>
+        <span class="card-text"><span class="card-title">Progress photo</span><span class="card-sub">${day.photo ? 'Saved · take another to replace it' : 'Take one or pick from your photos'}</span></span>${CHECK}
+      </div>
+      <div class="photo-actions">
+        <!-- capture opens the camera directly; newer Android photo pickers have no camera option -->
+        <label class="btn-add photo-btn">${CAMERA_ICON}Take photo
+          <input class="visually-hidden" type="file" accept="image/*" capture data-field="photo"></label>
+        <label class="chip photo-btn">From library
+          <input class="visually-hidden" type="file" accept="image/*" data-field="photo"></label>
+      </div>
     </div>`;
 }
 
