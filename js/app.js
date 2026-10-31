@@ -531,6 +531,7 @@ function onboarding() {
       <div class="row"><input type="date" id="start-date" class="field" min="${earliestStart()}" value="${C.dateKey(clock.now())}"><button class="btn-secondary" data-action="start-on-date">Set</button></div>
     </div>
     ${installPrompt && !isInstalled() ? '<button class="btn-secondary install-btn" data-action="install">Install app on this phone</button>' : ''}
+    ${isIOS && !isInstalled() ? `<p class="banner ios-install"><b>Install first.</b> On iPhone, the home-screen app keeps its own log, separate from Safari. ${installHelp()}</p>` : ''}
   </section>`;
 }
 
@@ -914,7 +915,7 @@ function cloudGroup() {
   const last = cloud.lastSync();
   const synced = last ? `Synced ${new Date(last).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : 'Not synced yet';
   const perm = 'Notification' in window ? Notification.permission : 'unsupported';
-  const push = !cloud.pushConfigured() ? '<span class="muted">not set up yet (Firebase settings missing)</span>'
+  const push = pushBlocker() ? `<span class="muted push-note">${pushBlocker()}</span>`
     : state.cloud.pushToken ? '<b class="accent">on</b>'
     : perm === 'denied' ? '<span class="warn-text">blocked in phone settings</span>'
     : '<button class="btn-secondary" data-action="cloud-push">Enable</button>';
@@ -983,7 +984,24 @@ function installRow() {
       <button class="btn-secondary" data-action="install">Install</button>
     </div></div>`;
   }
-  return `<div class="group"><p class="muted install-help">To install: open the browser menu <b>⋮</b> and tap <b>Install app</b> or <b>Add to Home screen</b>.</p></div>`;
+  return `<div class="group"><p class="muted install-help">${installHelp()}</p></div>`;
+}
+
+// iPhone/iPad (iPadOS reports itself as a Mac with touch).
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+function installHelp() {
+  return isIOS
+    ? 'To install: open this page in <b>Safari</b>, tap <b>Share</b> (the square with an arrow), then <b>Add to Home Screen</b>. Open Ironclad from the home-screen icon from then on: notifications only work there.'
+    : 'To install: open the browser menu <b>⋮</b> and tap <b>Install app</b> or <b>Add to Home screen</b>.';
+}
+
+// Why push can't be turned on here, or '' when it can.
+function pushBlocker() {
+  if (!cloud.pushConfigured()) return 'not set up yet (Firebase settings missing)';
+  if (isIOS && !isInstalled()) return 'open Ironclad from your home-screen icon to turn these on';
+  if (!('Notification' in window) || !('PushManager' in window)) return isIOS ? 'needs iOS 16.4 or newer' : 'not supported in this browser';
+  return '';
 }
 
 function debugPanel() {
@@ -1243,11 +1261,11 @@ const actions = {
   },
   export(el) {
     busy(el, 'Preparing…', async () => {
-      const { photos, bytes } = await B.exportBackup(state);
+      const { photos, bytes, shared } = await B.exportBackup(state);
       state = { ...state, lastBackupAt: Date.now() };
       save();
       render();
-      toast(`Backup saved: ${photos} photo${photos === 1 ? '' : 's'}, ${(bytes / 1048576).toFixed(1)} MB. Check your Downloads.`);
+      toast(`Backup saved: ${photos} photo${photos === 1 ? '' : 's'}, ${(bytes / 1048576).toFixed(1)} MB.${shared ? '' : ' Check your Downloads.'}`);
     });
   },
   'cal-day'(el) {

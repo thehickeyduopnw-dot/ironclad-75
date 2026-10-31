@@ -409,6 +409,14 @@ select {
 .closes-in { margin: 8px 0 0; font-size: 14px; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
 .closes-in.soon { color: var(--warn); }
 .hint[hidden] { display: none; }
+.ios-install { margin-top: 18px; font-size: 15px; }
+/* iPhone home-screen apps draw under the status bar, whose text is always white
+   (black-translucent): keep a dark strip behind it so light mode stays readable. */
+body::after {
+  content: ""; position: fixed; top: 0; left: 0; right: 0; height: var(--safe-t);
+  background: #0b0b0c; z-index: 90; pointer-events: none;
+}
+.push-note { text-align: right; font-size: 14px; max-width: 60%; }
 
 /* ---- Photos ------------------------------------------------------------------ */
 

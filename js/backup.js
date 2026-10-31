@@ -16,6 +16,8 @@ export function backupState(state) {
   return { ...state, cloud: { url: state.cloud.url || '', appliedIds: state.cloud.appliedIds || [] } };
 }
 
+const preferShare = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 // Builds the file in pieces so a few dozen photos don't become one giant string.
 export async function exportBackup(state) {
   const parts = [`{"app":"ironclad-75","format":1,"exportedAt":${JSON.stringify(new Date().toISOString())},"state":${JSON.stringify(backupState(state))},"photos":{`];
@@ -30,9 +32,24 @@ export async function exportBackup(state) {
 
   const blob = new Blob(parts, { type: 'application/json' });
   const stamp = new Date().toISOString().slice(0, 10);
+  const name = `ironclad-75-backup-${stamp}.json`;
+
+  // iPhone home-screen apps can't save downloads well: use the share sheet
+  // (Save to Files, iCloud Drive, ...) when the device supports sharing files.
+  const file = new File([blob], name, { type: 'application/json' });
+  if (preferShare() && navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: 'Ironclad 75 backup' });
+      return { photos: count, bytes: blob.size, shared: true };
+    } catch (err) {
+      if (err?.name === 'AbortError') throw new Error('Backup not saved (share was cancelled).');
+      // Otherwise fall back to a normal download below.
+    }
+  }
+
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `ironclad-75-backup-${stamp}.json`;
+  a.download = name;
   document.body.appendChild(a);
   a.click();
   a.remove();
