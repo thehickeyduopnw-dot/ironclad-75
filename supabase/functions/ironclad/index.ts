@@ -482,7 +482,8 @@ if (typeof Deno !== 'undefined') {
   const env = {
     db: restDb(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')),
     now: () => new Date(),
-    sendPush: (token, data) => sendFcm(Deno.env.get('FIREBASE_SERVICE_ACCOUNT'), token, data),
+    // Either spelling of the secret's name works.
+    sendPush: (token, data) => sendFcm(Deno.env.get('FIREBASE_SERVICE_ACCOUNT') ?? Deno.env.get('firebase_service_account'), token, data),
   };
   Deno.serve((req) => handle(req, env));
 }
