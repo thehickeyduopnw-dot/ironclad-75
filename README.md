@@ -22,20 +22,35 @@ A personal 75-day discipline challenge tracker. It's an installable web app (PWA
 
 Keep using the same link: your data is saved under that address.
 
-## Reminders
+## Cloud backend and Muse API
 
-The phone can't schedule its own notifications, so a tiny free **Cloudflare Worker** sends one push at your reminder time, only if today isn't finished. It stores only the push address, your reminder time and time zone, and "today: done / N left". The push itself is empty; your phone writes the message from its own log.
+An optional backend on **Supabase** (database + Edge Function) syncs your daily log so the **Muse** assistant can read your progress and send you notifications. Push uses **Firebase Cloud Messaging (FCM)**. Both are free plans, and no credit card is needed. The app stays local-first: it saves on the phone first, works fully offline, and syncs quietly when it can. Photos never leave the phone. API details are in [docs/API.md](docs/API.md).
 
-One-time setup, about 10 minutes, all in the browser:
+The evening reminder runs on this backend too. Without it, Today still shows a reminder banner after your reminder time.
 
-1. **Create a free Cloudflare account** at https://dash.cloudflare.com/sign-up.
-2. **Create the Worker.** Go to **Workers & Pages → Create → Create Worker** (the "Hello World" starter). Name it `ironclad-reminders` and click **Deploy**.
-3. **Paste the code.** Click **Edit code**, delete everything in the editor, and paste in the whole of [`worker/reminders.js`](worker/reminders.js). Use the **Raw** button on GitHub to copy it cleanly. Click **Deploy**.
-4. **Add storage.** Go to **Storage & Databases → KV → Create** (Workers KV), and name the namespace `ironclad`. Then, on your Worker, open **Bindings → Add binding → KV namespace**. Set the variable name to exactly **`KV`**, pick `ironclad`, and save.
-5. **Add the schedule.** On your Worker, open **Settings → Trigger events → Add → Cron trigger**. Enter `*/5 * * * *` (every 5 minutes) and save.
-6. **Link your phone.** Copy the Worker's address (e.g. `https://ironclad-reminders.yourname.workers.dev`). In the installed app, go to **Settings → Evening reminder**, paste the address, and tap **Turn on reminders**. Allow notifications when asked. Then tap **Send test**; a notification should arrive within a few seconds.
+One-time setup, about 15 minutes, all in the browser:
 
-Reminders are checked every 5 minutes, so an 8:00 PM reminder arrives between 8:00 and 8:05. To use a new phone, import your backup first (it carries the link), then turn reminders on. If you lose the old phone without a backup, delete the `config` key in the `ironclad` KV namespace and link again.
+**Supabase (the database and API)**
+1. Sign up at https://supabase.com and create a **New project** (name it `ironclad-75`, pick a region near you, and save the database password it generates).
+2. **SQL Editor:** paste [`supabase/setup.sql`](supabase/setup.sql) and click **Run**.
+3. **Edge Functions → Deploy a new function → Via Editor.** Name it exactly `ironclad`, replace the sample code with the whole of [`supabase/functions/ironclad/index.ts`](supabase/functions/ironclad/index.ts) (use GitHub's **Raw** button to copy it), and click **Deploy**.
+4. Open the function's **Details/Settings** and turn **off** "Verify JWT" ("Enforce JWT verification"). The function checks your own API key instead; with this on, Supabase blocks Muse's requests.
+5. **Integrations → Cron → Create job:** every 5 minutes (`*/5 * * * *`), type **Supabase Edge Function**, function `ironclad`, method **POST**, path/URL ending in `/ironclad/cron`. (Or run [`supabase/cron.sql`](supabase/cron.sql) with your project ref filled in.)
+
+**Firebase (push notifications only)**
+
+6. At https://console.firebase.google.com create a project (Google Analytics not needed).
+7. **Project settings → General → Your apps → Web (`</>`):** register an app and copy the `firebaseConfig` it shows. These are public identifiers, safe to share.
+8. **Project settings → Cloud Messaging → Web Push certificates → Generate key pair:** copy the public key.
+9. Steps 7 and 8 go into [`js/cloud-config.js`](js/cloud-config.js). Send them to Claude, or paste them in yourself and push.
+10. **Project settings → Service accounts → Generate new private key.** This downloads a JSON file, and it is a **secret**: don't share or commit it. In Supabase, go to **Edge Functions → Secrets → Add new secret**, name it `FIREBASE_SERVICE_ACCOUNT`, and paste the whole file's contents as the value.
+
+**Phone**
+
+11. In the installed app: **Settings → Cloud & Muse**. Paste `https://<your-project-ref>.supabase.co/functions/v1/ironclad`, tap **Connect**, and allow notifications.
+12. Tap **Generate** under "API key for Muse" and copy the key. It's shown only once. Give Muse the address and the key.
+
+The first phone to connect becomes the only phone the backend accepts. To move to a new phone, import your backup there; the link comes with it.
 
 ## Backup
 
@@ -50,11 +65,12 @@ Reminders are checked every 5 minutes, so an 8:00 PM reminder arrives between 8:
 | `js/app.js` | Screens and user input |
 | `js/store.js` | IndexedDB storage (state + photos) |
 | `js/calories.js` | Calorie burn calculator (Mifflin-St Jeor) |
-| `js/reminders.js` | Links the phone to the reminder Worker |
+| `js/cloud.js`, `js/cloud-config.js` | Cloud sync, push token, API key (phone side) |
 | `js/backup.js` | Export/import |
 | `js/feedback.js`, `js/photo.js`, `js/clock.js` | Sounds/vibration/confetti, photo shrinking, test-only time travel |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Offline support, notifications, home-screen install |
-| `worker/reminders.js` | The Cloudflare Worker that sends reminders |
+| `supabase/` | Backend: database setup SQL and the API Edge Function |
+| `docs/API.md` | API reference for Muse |
 | `tests/index.html` | Tests (open in a browser) |
 | `tools/serve.ps1`, `tools/make-icons.ps1` | Local test server, icon generator (Windows PowerShell) |
 
@@ -72,4 +88,4 @@ powershell -ExecutionPolicy Bypass -File tools\serve.ps1
 
 ## Updating
 
-Push to `main` and GitHub Pages redeploys in about a minute. The installed app shows the cached copy first, then picks up the new version on the next launch. If you add or rename a file, add it to `SHELL` in `sw.js` and change `VERSION`. If you change `worker/reminders.js`, paste it into the Cloudflare editor again.
+Push to `main` and GitHub Pages redeploys in about a minute. The installed app shows the cached copy first, then picks up the new version on the next launch. If you add or rename a file, add it to `SHELL` in `sw.js` and change `VERSION`. If you change `supabase/functions/ironclad/index.ts`, paste it into the Supabase function editor again and deploy.

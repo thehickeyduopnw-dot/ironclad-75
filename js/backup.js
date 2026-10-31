@@ -53,9 +53,11 @@ export async function restoreBackup(data) {
   for (const [key, url] of Object.entries(photos)) {
     await store.putPhoto(key, await (await fetch(url)).blob());
   }
-  // Reminders point at the old phone's push address; they're re-enabled from Settings.
-  const reminders = { url: '', token: '', ...data.state.reminders, on: false };
-  await store.saveState({ ...data.state, reminders });
+  // The cloud link carries over; this phone registers its own push token on launch.
+  const restored = { ...data.state };
+  delete restored.reminders; // from older versions
+  if (restored.cloud) restored.cloud = { ...restored.cloud, pushToken: null };
+  await store.saveState(restored);
   for (const key of await store.photoKeys()) {
     if (!(key in photos)) await store.deletePhoto(key);
   }

@@ -8,7 +8,7 @@
 // Open http://localhost:8080/tests/ to run. Covers the day counter and reset rules.
 import * as C from '../js/challenge.js';
 import * as K from '../js/calories.js';
-import worker, { runReminder, localNow } from '../worker/reminders.js';
+import { handle, runReminder, localDate, emptyDay, googleAccessToken, sendFcm } from '../supabase/functions/ironclad/index.ts';
 
 const out = document.getElementById('out');
 let failed = 0;
@@ -211,60 +211,168 @@ await test('photos map to their run and day', () => {
   eq(C.runForKey(s, '2026-10-15'), null);
 });
 
-// ---- Reminder Worker, with a fake KV store and push service ----
-function mockEnv() {
+// ---- Cloud API (Supabase Edge Function), with an in-memory database and fake push ----
+function mockEnv(nowIso = '2026-10-31T19:00:00Z') {
   const kv = new Map();
+  const days = new Map();
   const sent = [];
-  return {
-    sent,
-    KV: { get: async (k, type) => (kv.has(k) ? (type === 'json' ? JSON.parse(kv.get(k)) : kv.get(k)) : null), put: async (k, v) => { kv.set(k, v); } },
-    FETCH: async (url, init) => { sent.push({ url, init }); return new Response(null, { status: 201 }); },
+  const env = {
+    sent, kv, days,
+    clock: new Date(nowIso),
+    now: () => new Date(env.clock),
+    pushResult: { ok: true, status: 200 },
+    sendPush: async (token, data) => { sent.push({ token, data }); return env.pushResult; },
+    db: {
+      getKV: async (k) => structuredClone(kv.get(k) ?? null),
+      setKV: async (k, v) => { if (v == null) kv.delete(k); else kv.set(k, structuredClone(v)); },
+      upsertDays: async (rows) => rows.forEach((r) => days.set(r.date, structuredClone(r))),
+      getDays: async (from, to) => [...days.values()].filter((r) => r.date >= from && r.date <= to).sort((a, b) => (a.date < b.date ? 1 : -1)).map((r) => ({ date: r.date, data: r.data })),
+    },
   };
+  return env;
 }
-const post = (env, path, body) => worker.fetch(new Request(`https://w.test${path}`, { method: 'POST', body: JSON.stringify(body) }), env).then(async (r) => ({ status: r.status, data: await r.json() }));
-const SUB = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc', keys: { p256dh: 'x', auth: 'y' } };
-const pdt = (h, m, day = 31) => Date.UTC(2026, 9, day, h + 7, m); // Oct 2026 is UTC-7
+const BASE = 'https://ref.supabase.co/functions/v1/ironclad';
+async function api(env, method, path, { key, secret, body } = {}) {
+  const headers = {};
+  if (key) headers.Authorization = `Bearer ${key}`;
+  if (secret) headers['X-App-Secret'] = secret;
+  const raw = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
+  const res = await handle(new Request(BASE + path, { method, headers, body: raw }), env);
+  return { status: res.status, data: await res.json() };
+}
+async function linkedEnv() {
+  const env = mockEnv();
+  const secret = (await api(env, 'POST', '/link', { body: {} })).data.app_secret;
+  const key = (await api(env, 'POST', '/api-key/regenerate', { secret })).data.api_key;
+  return { env, secret, key };
+}
+function syncedDay(date, n, overrides = {}) {
+  const d = emptyDay(date, n);
+  for (const t of Object.values(d.tasks)) { t.done = true; t.done_at = `${date}T15:00:00.000Z`; }
+  d.tasks.workout_1.outdoor = true;
+  return { ...d, complete: true, outdoor_rule_met: true, ...overrides };
+}
+const PROGRESS = { start_date: '2026-10-29', status: 'active', total_days_completed: 2, tz: 'America/Los_Angeles' };
 
-await test('worker: local time follows the phone time zone', () => {
-  eq(localNow(pdt(20, 5), 'America/Los_Angeles'), { date: '2026-10-31', time: '20:05' });
+await test('api: missing or wrong key gets 401 and no data, on every endpoint', async () => {
+  const { env } = await linkedEnv();
+  for (const [m, p] of [['GET', '/today'], ['GET', '/summary'], ['GET', '/history?days=7'], ['POST', '/notify'], ['POST', '/device-token'], ['POST', '/sync'], ['POST', '/api-key/regenerate']]) {
+    for (const key of [undefined, 'ic75_wrong']) {
+      const r = await api(env, m, p, { key, body: m === 'POST' ? { title: 'x', token: 'x'.repeat(30) } : undefined });
+      eq(r.status, 401);
+      eq(Object.keys(r.data), ['error']);
+    }
+  }
 });
 
-await test('worker: first phone links, others are refused', async () => {
-  const env = mockEnv();
-  const first = await post(env, '/subscribe', { subscription: SUB, reminderTime: '20:00', tz: 'America/Los_Angeles' });
-  eq(first.status, 200);
-  eq((await post(env, '/subscribe', { subscription: SUB })).status, 403);
-  eq((await post(env, '/status', { token: 'wrong', status: {} })).status, 403);
-  eq((await post(env, '/subscribe', { token: first.data.token, subscription: SUB })).status, 200);
+await test('api: link once; regenerate invalidates the old key; revoke blocks access', async () => {
+  const { env, secret, key } = await linkedEnv();
+  eq((await api(env, 'POST', '/link', { body: {} })).status, 403);
+  eq((await api(env, 'GET', '/summary', { key })).status, 200);
+  const key2 = (await api(env, 'POST', '/api-key/regenerate', { secret })).data.api_key;
+  eq((await api(env, 'GET', '/summary', { key })).status, 401);
+  eq((await api(env, 'GET', '/summary', { key: key2 })).status, 200);
+  eq((await api(env, 'GET', '/api-key', { secret })).data.active, true);
+  await api(env, 'POST', '/api-key/revoke', { secret });
+  eq((await api(env, 'GET', '/summary', { key: key2 })).status, 401);
+  eq((await api(env, 'GET', '/api-key', { secret })).data.active, false);
+  eq([...env.kv.values()].some((v) => JSON.stringify(v).includes(key2)), false); // only hashes are stored
 });
 
-await test('worker: one push after reminder time, skipped when done', async () => {
-  const env = mockEnv();
-  const { data } = await post(env, '/subscribe', { subscription: SUB, reminderTime: '20:00', tz: 'America/Los_Angeles' });
-  await post(env, '/status', { token: data.token, status: { date: '2026-10-31', active: true, complete: false, left: 3 } });
-  eq(await runReminder(env, pdt(19, 55)), 'waiting');
-  eq(await runReminder(env, pdt(20, 5)), 'sent (201)');
-  eq(await runReminder(env, pdt(20, 10)), 'waiting'); // already sent today
+await test('api: /today and /summary reflect the synced log', async () => {
+  const { env, secret, key } = await linkedEnv();
+  const partial = syncedDay('2026-10-31', 3, { complete: false });
+  partial.tasks.water = { done: false, done_at: null, oz: 64, goal_oz: 128 };
+  await api(env, 'POST', '/sync', { secret, body: { progress: PROGRESS, days: [syncedDay('2026-10-29', 1), syncedDay('2026-10-30', 2), partial], reminder: { time: '20:00', enabled: true } } });
+  const today = (await api(env, 'GET', '/today', { key })).data; // 12:00 PM in Los Angeles
+  eq([today.date, today.day_number, today.complete, today.tasks.water.oz, today.tasks.diet.done], ['2026-10-31', 3, false, 64, true]);
+  eq(typeof today.synced_at, 'string');
+  const summary = (await api(env, 'GET', '/summary', { key })).data;
+  eq(summary, { start_date: '2026-10-29', current_day: 3, total_days_completed: 2, today_complete: false, status: 'active', synced_at: summary.synced_at });
+});
+
+await test('api: unsynced today still gets the right day number, all tasks not done', async () => {
+  const { env, secret, key } = await linkedEnv();
+  await api(env, 'POST', '/sync', { secret, body: { progress: PROGRESS, days: [] } });
+  env.clock = new Date('2026-11-02T18:00:00Z');
+  const t = (await api(env, 'GET', '/today', { key })).data;
+  eq([t.date, t.day_number, t.complete, Object.values(t.tasks).every((x) => !x.done)], ['2026-11-02', 5, false, true]);
+});
+
+await test('api: /history returns N days, newest first, and validates days', async () => {
+  const { env, secret, key } = await linkedEnv();
+  await api(env, 'POST', '/sync', { secret, body: { progress: PROGRESS, days: [syncedDay('2026-10-29', 1), syncedDay('2026-10-30', 2)] } });
+  const h7 = (await api(env, 'GET', '/history?days=7', { key })).data.days;
+  eq(h7.map((d) => d.date), ['2026-10-31', '2026-10-30', '2026-10-29', '2026-10-28', '2026-10-27', '2026-10-26', '2026-10-25']);
+  eq(h7.map((d) => d.day_number), [3, 2, 1, null, null, null, null]);
+  eq((await api(env, 'GET', '/history?days=30', { key })).data.days.length, 30);
+  eq((await api(env, 'GET', '/history', { key })).data.days.length, 7);
+  for (const bad of ['0', 'abc', '2.5', '400']) eq((await api(env, 'GET', `/history?days=${bad}`, { key })).status, 400);
+});
+
+await test('api: /device-token then /notify sends a real push; errors are clear', async () => {
+  const { env, key } = await linkedEnv();
+  eq((await api(env, 'POST', '/notify', { key, body: { title: 'Hi', body: 'x' } })).status, 409); // no phone yet
+  eq((await api(env, 'POST', '/device-token', { key, body: { token: 'short' } })).status, 400);
+  eq((await api(env, 'POST', '/device-token', { key, body: { token: 'fcm-token-'.repeat(5), platform: 'android' } })).status, 200);
+  eq((await api(env, 'POST', '/notify', { key, body: { body: 'no title' } })).status, 400);
+  const ok = await api(env, 'POST', '/notify', { key, body: { title: 'Muse', body: 'Drink some water' } });
+  eq([ok.status, ok.data], [200, { ok: true, sent: true }]);
+  eq(env.sent[0], { token: 'fcm-token-'.repeat(5), data: { kind: 'message', title: 'Muse', body: 'Drink some water' } });
+  env.pushResult = { ok: false, status: 404, error: 'Requested entity was not found.', unregistered: true };
+  eq((await api(env, 'POST', '/notify', { key, body: { title: 'Muse' } })).status, 502);
+  eq(env.kv.has('device'), false); // dead token dropped
+  eq((await api(env, 'POST', '/notify', { key, body: 'not json' })).status, 400);
+});
+
+await test('api: evening reminder sends once, only when the day is unfinished', async () => {
+  const { env, secret, key } = await linkedEnv();
+  await api(env, 'POST', '/device-token', { key, body: { token: 'fcm-token-'.repeat(5) } });
+  await api(env, 'POST', '/sync', { secret, body: { progress: PROGRESS, days: [syncedDay('2026-10-31', 3, { complete: false })], reminder: { time: '20:00', enabled: true } } });
+  env.clock = new Date('2026-11-01T02:55:00Z'); // 7:55 PM PDT
+  eq(await runReminder(env), 'waiting');
+  env.clock = new Date('2026-11-01T03:05:00Z'); // 8:05 PM
+  eq(await runReminder(env), 'sent');
+  eq(env.sent.at(-1).data, { kind: 'reminder' });
+  eq(await runReminder(env), 'already sent today');
+  // Next day: finished before the reminder, so nothing is sent.
+  await api(env, 'POST', '/sync', { secret, body: { progress: PROGRESS, days: [syncedDay('2026-11-01', 4)] } });
+  env.clock = new Date('2026-11-02T04:05:00Z'); // Nov 1, 8:05 PM PST
+  eq(await runReminder(env), 'day complete');
+  await api(env, 'POST', '/sync', { secret, body: { reminder: { time: '20:00', enabled: false } } });
+  eq(await runReminder(env), 'off');
+  eq((await api(env, 'POST', '/cron')).data.result, 'off'); // public cron route returns no data
   eq(env.sent.length, 1);
-  await post(env, '/status', { token: data.token, status: { date: '2026-11-01', active: true, complete: true, left: 0 } });
-  eq(await runReminder(env, Date.UTC(2026, 10, 2, 4, 5)), 'day complete'); // Nov 1, 8:05 PM PST
-  await post(env, '/settings', { token: data.token, enabled: false });
-  eq(await runReminder(env, Date.UTC(2026, 10, 3, 4, 5)), 'off');
 });
 
-await test('worker: VAPID signature verifies with the public key', async () => {
-  const env = mockEnv();
-  const { data } = await post(env, '/subscribe', { subscription: SUB, tz: 'UTC' });
-  await post(env, '/test', { token: data.token });
-  const auth = env.sent[0].init.headers.Authorization;
-  const [, jwt, k] = auth.match(/^vapid t=([^,]+), k=(.+)$/);
-  const [h, p, sig] = jwt.split('.');
+await test('fcm: service-account sign-in is correctly signed; message is data-only', async () => {
+  const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
+  const der = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey));
+  const pem = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...der)).match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----\n`;
+  const account = { project_id: 'ironclad-test', client_email: 'fcm@ironclad-test.iam.gserviceaccount.com', private_key: pem };
+  const calls = [];
+  const fakeFetch = async (url, init) => {
+    calls.push({ url, init });
+    if (url.includes('oauth2')) return new Response(JSON.stringify({ access_token: 'ya29.test', expires_in: 3600 }));
+    return new Response(JSON.stringify({ name: 'projects/ironclad-test/messages/1' }));
+  };
+  const res = await sendFcm(JSON.stringify(account), 'device-token', { kind: 'message', title: 'T', body: 'B' }, fakeFetch);
+  eq(res.ok, true);
+  const assertion = new URLSearchParams(calls[0].init.body).get('assertion');
+  const [h, p, sig] = assertion.split('.');
   const bytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
-  const key = await crypto.subtle.importKey('raw', bytes(k), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
-  const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, bytes(sig), new TextEncoder().encode(`${h}.${p}`));
-  eq(ok, true);
-  eq(JSON.parse(new TextDecoder().decode(bytes(p))).aud, 'https://fcm.googleapis.com');
+  eq(await crypto.subtle.verify('RSASSA-PKCS1-v1_5', pair.publicKey, bytes(sig), new TextEncoder().encode(`${h}.${p}`)), true);
+  eq(JSON.parse(new TextDecoder().decode(bytes(p))).scope, 'https://www.googleapis.com/auth/firebase.messaging');
+  eq(calls[1].url, 'https://fcm.googleapis.com/v1/projects/ironclad-test/messages:send');
+  eq(calls[1].init.headers.Authorization, 'Bearer ya29.test');
+  const msg = JSON.parse(calls[1].init.body).message;
+  eq([msg.token, msg.data, 'notification' in msg], ['device-token', { kind: 'message', title: 'T', body: 'B' }, false]);
 });
+
+await test('api: time zone date math', () => {
+  eq(localDate(new Date('2026-11-01T06:30:00Z'), 'America/Los_Angeles'), { date: '2026-10-31', time: '23:30' });
+});
+
 
 out.innerHTML += failed ? `\n<span class="fail">${failed} FAILED</span>` : '\n<span class="pass">ALL PASSED</span>';
 document.title = failed ? 'FAILED' : 'PASSED';

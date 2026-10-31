@@ -1,12 +1,12 @@
 // Service worker (module). Offline: the app shell is cached, served from cache, and
 // refreshed in the background, so a new deploy shows up on the next launch.
 // Bump VERSION when the file list changes.
-// Reminders: the reminder push is empty; the text comes from the on-device log.
+// Push: see the 'push' handler below.
 
 import { dateKey, dayNumber, missingTasks } from './js/challenge.js';
 import { loadState } from './js/store.js';
 
-const VERSION = 'ironclad-v6';
+const VERSION = 'ironclad-v7';
 const SHELL = [
   './',
   './index.html',
@@ -19,7 +19,8 @@ const SHELL = [
   './js/feedback.js',
   './js/photo.js',
   './js/calories.js',
-  './js/reminders.js',
+  './js/cloud.js',
+  './js/cloud-config.js',
   './js/backup.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -63,9 +64,27 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
+// Pushes come from Firebase Cloud Messaging as data-only messages:
+// { kind: 'reminder' } (text written here from the phone's own log) or
+// { kind: 'message', title, body } (e.g. sent by Muse through POST /notify).
 self.addEventListener('push', (event) => {
-  event.waitUntil(showReminder());
+  let data = {};
+  try {
+    const payload = event.data?.json() ?? {};
+    data = payload.data ?? payload.notification ?? payload;
+  } catch {}
+  event.waitUntil(data.title ? notify(data.title, data.body || '') : showReminder());
 });
+
+function notify(title, body) {
+  return self.registration.showNotification(title, {
+    body,
+    icon: 'icons/icon-192.png',
+    badge: 'icons/badge-96.png',
+    tag: 'ironclad-message',
+    vibrate: [80, 60, 80],
+  });
+}
 
 async function showReminder() {
   let title = 'Ironclad 75';

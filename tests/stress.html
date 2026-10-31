@@ -230,7 +230,6 @@ await test('backup with 75 full-size photos: export, import, byte-for-byte', asy
   const a = new Uint8Array(await sample.arrayBuffer()), b = new Uint8Array(await restored.arrayBuffer());
   assert(a.length === b.length && a.every((x, i) => x === b[i]), 'restored photo differs');
   assert(photoKeys.length === 75 && Object.keys(back.days).length === 75, 'counts differ after restore');
-  assert(back.reminders.on === false, 'reminders should be off after import');
   const est = await navigator.storage?.estimate?.();
   return `${(res.bytes / 1048576).toFixed(1)} MB file (avg photo ${(sample.size / 1024).toFixed(0)} KB); export ${(exportMs / 1000).toFixed(1)} s, import ${(importMs / 1000).toFixed(1)} s${est ? `; browser quota ${(est.quota / 1073741824).toFixed(1)} GB` : ''}`;
 });

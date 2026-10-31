@@ -430,6 +430,12 @@ select {
 .time-input { min-height: 44px; padding: 0 12px; border-radius: 12px; border: 0; background: var(--surface-2); font-weight: 700; font-size: 17px; }
 .setting.col .btn-primary { margin-top: 2px; }
 .group a { color: var(--accent-text); font-weight: 700; }
+.group code { font-size: 13px; word-break: break-all; }
+.key-box { display: grid; gap: 10px; margin: 6px 0 12px; }
+.key-box code {
+  display: block; padding: 12px; border-radius: 12px; background: var(--surface-2);
+  font-size: 15px; font-weight: 700; user-select: all; -webkit-user-select: all;
+}
 
 /* ---- Calorie calculator ------------------------------------------------- */
 

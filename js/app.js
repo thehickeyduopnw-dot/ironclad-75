@@ -6,7 +6,7 @@ import * as fx from './feedback.js';
 import * as clock from './clock.js';
 import { prepareImage } from './photo.js';
 import * as K from './calories.js';
-import * as R from './reminders.js';
+import * as cloud from './cloud.js';
 import * as B from './backup.js';
 
 const screen = document.getElementById('screen');
@@ -44,7 +44,7 @@ function withDefaults(s) {
     ...s,
     settings: { ...C.defaultState().settings, ...s.settings },
     profile: { ...K.defaultProfile(), ...s.profile },
-    reminders: { url: '', token: '', on: false, ...s.reminders },
+    cloud: { url: '', secret: '', pushToken: null, ...s.cloud },
   };
 }
 
@@ -64,8 +64,12 @@ async function init() {
   await refreshPhotoList();
   evaluateNow();
   render();
-  R.syncStatus(state.reminders, reminderStatus());
   store.requestPersistence();
+  if (cloudOn()) {
+    cloud.syncNow(state.cloud, cloudPayload).catch(() => {});
+    refreshPushToken(false).catch(() => {});
+  }
+  addEventListener('online', syncSoon);
 
   setInterval(() => tick(false), 20000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(true); });
@@ -83,6 +87,7 @@ async function tick(force) {
     const saved = await store.loadState().catch(() => null);
     if (saved) state = withDefaults(saved);
     await refreshPhotoList();
+    syncSoon();
   }
   const changed = evaluateNow();
   const sig = currentOpenSignature();
@@ -104,24 +109,77 @@ function evaluateNow() {
 function save() {
   if (storageBroken) return;
   store.saveState(state).catch((err) => toast(`Couldn't save: ${err.message}`));
-  R.syncStatus(state.reminders, reminderStatus());
+  syncSoon();
 }
 
-// What the reminder service needs to know: is today finished?
-function reminderStatus() {
+// ---- Cloud (Supabase backend for Muse and push) -------------------------------------------
+// Test mode never syncs: practice data must not reach the real backend.
+
+const cloudOn = () => !clock.isDebug && !storageBroken && cloud.linked(state.cloud);
+const syncSoon = () => { if (cloudOn()) cloud.scheduleSync(state.cloud, cloudPayload); };
+
+// One day in the API's shape (see supabase/functions/ironclad).
+function apiDay(key, dayNumber) {
+  const raw = state.days[key];
+  const d = C.normalizeDay(raw);
+  const s = C.taskState(d);
+  const at = (id) => d.doneAt?.[id] ?? null;
+  const t = (id) => ({ done: s[id], done_at: s[id] ? at(id) : null });
+  return {
+    date: key,
+    day_number: dayNumber,
+    complete: C.isDayComplete(raw),
+    outdoor_rule_met: s.outdoor,
+    logged_off_app: !!raw?.manual,
+    tasks: {
+      workout_1: { ...t('workout1'), minutes: 45, outdoor: d.workout1.outdoor },
+      workout_2: { ...t('workout2'), minutes: 45, outdoor: d.workout2.outdoor },
+      diet: t('diet'),
+      no_alcohol: t('alcohol'),
+      water: { ...t('water'), oz: d.water, goal_oz: C.WATER_GOAL_OZ },
+      reading: { ...t('reading'), pages: d.reading.pages, goal_pages: C.PAGES_GOAL, title: d.reading.title.trim() || null },
+      progress_photo: t('photo'),
+    },
+  };
+}
+
+function cloudPayload() {
   const now = clock.now();
   const today = C.dateKey(now);
   const a = state.attempt;
-  const active = !!a && a.status === 'active' && a.startDate <= today;
-  const missing = C.missingTasks(state.days[today]);
+  const days = [];
+  if (a) {
+    for (let i = 0; i < C.TOTAL_DAYS; i++) {
+      const key = C.addDays(a.startDate, i);
+      if (key > today) break;
+      days.push(apiDay(key, i + 1));
+    }
+  }
+  const st = C.computeStats(state, now);
   return {
-    date: today,
-    active,
-    complete: active && missing.length === 0,
-    left: active ? missing.length : 0,
-    day: active ? C.dayNumber(a.startDate, today) : 0,
-    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    progress: {
+      start_date: a?.startDate ?? null,
+      status: !a ? 'none' : a.startDate > today ? 'not_started' : a.status,
+      total_days_completed: st.currentStreak,
+      longest_streak: st.longestStreak,
+      attempt: a?.status === 'completed' ? state.attempts.length : state.attempts.length + 1,
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    },
+    days,
+    reminder: { time: state.settings.reminderTime, enabled: state.settings.reminderPush !== false },
   };
+}
+
+// Keep the backend's push token current (on launch and whenever it changes).
+async function refreshPushToken(ask = false) {
+  if (!cloudOn()) return null;
+  const token = await cloud.getPushToken(ask);
+  if (token && token !== state.cloud.pushToken) {
+    await cloud.registerToken(state.cloud, token);
+    state = { ...state, cloud: { ...state.cloud, pushToken: token } };
+    save();
+  }
+  return token;
 }
 
 async function refreshPhotoList() {
@@ -162,6 +220,8 @@ function render() {
   screen.innerHTML = screens[tab]();
   screen.dataset.screen = tab;
   if (tab === 'today') patchToday();
+  if (tab === 'settings') loadApiKeyInfo();
+  else freshApiKey = null; // a new key is shown once, only until you leave Settings
   loadPhotos();
 }
 
@@ -460,6 +520,7 @@ function renderSettings() {
     </div>
 
     ${remindersGroup()}
+    ${cloudGroup()}
     ${backupGroup()}
     ${a ? '<div class="group"><button class="btn-danger" data-action="restart">Restart challenge</button></div>' : ''}
     ${clock.isDebug ? debugPanel() : ''}
@@ -716,29 +777,70 @@ function openLightbox(key) {
 
 // ---- Reminders and backup (Settings) -------------------------------------------
 
-const README_URL = 'https://github.com/thehickeyduopnw-dot/ironclad-75#reminders';
+const README_URL = 'https://github.com/thehickeyduopnw-dot/ironclad-75#cloud-backend-and-muse-api';
+let freshApiKey = null; // shown once after generating, then forgotten
+let apiKeyInfo = null; // { active, created_at } from the backend
 
 function remindersGroup() {
-  const r = state.reminders;
+  const pushReady = cloudOn() && state.cloud.pushToken;
   const time = `<div class="setting">
       <label for="set-remind">Reminder time</label>
       <input type="time" id="set-remind" class="time-input" data-setting="reminderTime" value="${state.settings.reminderTime}">
     </div>`;
-  let body;
-  if (!R.supported()) {
-    body = `<p class="muted pad-y">This browser can't receive push notifications. Today shows a reminder banner after this time instead.</p>`;
-  } else if (r.on) {
-    body = `<p class="pad-y"><b class="accent">On.</b> <span class="muted">You'll get a notification at ${fmtTime(state.settings.reminderTime)} if anything is left.</span></p>
-      <div class="row pad-b"><button class="btn-secondary grow" data-action="rem-test">Send test</button><button class="btn-secondary grow" data-action="rem-off">Turn off</button></div>`;
-  } else {
-    body = `<div class="setting col">
-        <label for="rem-url">Reminder service address</label>
-        <input id="rem-url" class="field" type="url" inputmode="url" autocomplete="off" placeholder="https://ironclad-reminders.you.workers.dev" value="${esc(r.url)}">
-        <button class="btn-primary" data-action="rem-on">Turn on reminders</button>
-        <small class="muted">Needs a free one-time setup (about 10 minutes): <a href="${README_URL}" target="_blank" rel="noopener">step-by-step guide</a>. Until then, Today shows a banner after this time.</small>
-      </div>`;
-  }
+  const body = pushReady
+    ? `<div class="setting">
+        <label for="set-remind-push">Push notification</label>
+        <input type="checkbox" id="set-remind-push" class="switch" data-setting="reminderPush" ${state.settings.reminderPush !== false ? 'checked' : ''}>
+      </div>
+      <small class="muted pad">Sent at ${fmtTime(state.settings.reminderTime)} only if something is left. Today also shows a banner.</small>`
+    : `<p class="muted pad-y">Today shows a banner after this time. For a push notification, connect the cloud backend below.</p>`;
   return `<div class="group"><h3>Evening reminder</h3>${time}${body}</div>`;
+}
+
+function cloudGroup() {
+  if (clock.isDebug) return '<div class="group"><h3>Cloud &amp; Muse</h3><p class="muted pad-y">Turned off in test mode.</p></div>';
+  if (!cloud.linked(state.cloud)) {
+    return `<div class="group"><h3>Cloud &amp; Muse</h3>
+      <div class="setting col">
+        <label for="cloud-url">Backend address</label>
+        <input id="cloud-url" class="field" type="url" inputmode="url" autocomplete="off" placeholder="https://xxxx.supabase.co/functions/v1/ironclad">
+        <button class="btn-primary" data-action="cloud-link">Connect</button>
+        <small class="muted">Syncs your daily log so Muse can read it, and enables push notifications. Your photos stay on the phone. One-time setup: <a href="${README_URL}" target="_blank" rel="noopener">guide</a>.</small>
+      </div></div>`;
+  }
+  const last = cloud.lastSync();
+  const synced = last ? `Synced ${new Date(last).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : 'Not synced yet';
+  const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  const push = !cloud.pushConfigured() ? '<span class="muted">not set up yet (Firebase settings missing)</span>'
+    : state.cloud.pushToken ? '<b class="accent">on</b>'
+    : perm === 'denied' ? '<span class="warn-text">blocked in phone settings</span>'
+    : '<button class="btn-secondary" data-action="cloud-push">Enable</button>';
+  const key = freshApiKey
+    ? `<div class="key-box"><p class="fine warn-text">Copy it now: it won't be shown again.</p><code id="api-key">${esc(freshApiKey)}</code>
+        <button class="btn-primary" data-action="key-copy">Copy API key</button></div>`
+    : `<p class="muted pad-y">API key: ${apiKeyInfo == null ? '…' : apiKeyInfo.active ? `active since ${new Date(apiKeyInfo.created_at).toLocaleDateString()}` : 'none'}</p>`;
+
+  return `<div class="group"><h3>Cloud &amp; Muse</h3>
+    <div class="setting"><span>${synced}</span><button class="btn-secondary" data-action="cloud-sync">Sync now</button></div>
+    <div class="setting"><span>Notifications</span>${push}</div>
+    ${state.cloud.pushToken ? '<div class="setting"><span>Test</span><button class="btn-secondary" data-action="cloud-test">Send test</button></div>' : ''}
+    <h3>API key for Muse</h3>
+    ${key}
+    <div class="row pad-b">
+      <button class="btn-secondary grow" data-action="key-new">${apiKeyInfo?.active ? 'Regenerate' : 'Generate'}</button>
+      ${apiKeyInfo?.active ? '<button class="btn-secondary grow" data-action="key-revoke">Revoke</button>' : ''}
+    </div>
+    <p class="muted fine pad-b">API address: <code>${esc(state.cloud.url)}</code></p>
+  </div>`;
+}
+
+// Fetch the key status once per visit to Settings.
+function loadApiKeyInfo() {
+  if (!cloudOn() || apiKeyInfo) return;
+  cloud.apiKeyStatus(state.cloud).then((info) => {
+    apiKeyInfo = info;
+    if (tab === 'settings') render();
+  }).catch(() => {});
 }
 
 function backupGroup() {
@@ -811,12 +913,19 @@ function updateDay(key, mutate, { rerender = true } = {}) {
   const wasComplete = C.isDayComplete(before);
   const day = structuredClone(before);
   mutate(day);
-  state = { ...state, days: { ...state.days, [key]: day } };
-  save();
 
   const next = C.taskState(day);
   const gained = C.TASKS.filter((t) => next[t.id] && !prev[t.id]).map((t) => t.id);
   const lost = C.TASKS.some((t) => prev[t.id] && !next[t.id]);
+  // When each task was finished (shared with Muse through the API).
+  day.doneAt = { ...day.doneAt };
+  for (const t of C.TASKS) {
+    if (gained.includes(t.id)) day.doneAt[t.id] = clock.now().toISOString();
+    else if (!next[t.id]) delete day.doneAt[t.id];
+  }
+
+  state = { ...state, days: { ...state.days, [key]: day } };
+  save();
 
   if (rerender) render();
   else patchToday();
@@ -908,30 +1017,67 @@ const actions = {
   lightbox(el) {
     openLightbox(el.dataset.key);
   },
-  'rem-on'(el) {
-    busy(el, 'Turning on…', async () => {
-      const url = document.getElementById('rem-url').value.trim();
-      const rem = { ...state.reminders, url };
-      const token = await R.enable(rem, state.settings.reminderTime, reminderStatus());
-      state = { ...state, reminders: { url, token, on: true } };
+  'cloud-link'(el) {
+    busy(el, 'Connecting…', async () => {
+      const linkedCloud = await cloud.link(document.getElementById('cloud-url').value.trim());
+      state = { ...state, cloud: linkedCloud };
       save();
+      await cloud.syncNow(state.cloud, cloudPayload);
+      const token = await refreshPushToken(true).catch(() => null);
+      apiKeyInfo = null;
       render();
-      toast('Reminders are on.');
+      loadApiKeyInfo();
+      toast(token ? 'Connected. Synced, and notifications are on.' : 'Connected and synced.');
     });
   },
-  'rem-off'(el) {
-    busy(el, 'Turning off…', async () => {
-      await R.disable(state.reminders);
-      state = { ...state, reminders: { ...state.reminders, on: false } };
-      save();
+  'cloud-sync'(el) {
+    busy(el, 'Syncing…', async () => {
+      await cloud.syncNow(state.cloud, cloudPayload);
       render();
     });
   },
-  'rem-test'(el) {
+  'cloud-push'(el) {
+    busy(el, 'Enabling…', async () => {
+      const token = await refreshPushToken(true);
+      if (!token) throw new Error("Notifications weren't allowed. Allow them for this app in your phone's settings.");
+      render();
+    });
+  },
+  'cloud-test'(el) {
     busy(el, 'Sending…', async () => {
-      const { status } = await R.sendTest(state.reminders);
-      toast(status < 300 ? 'Test sent. It should arrive in a few seconds.' : `The push service answered ${status}. Try turning reminders off and on.`);
+      await cloud.sendTest(state.cloud);
+      toast('Test sent. It should arrive in a few seconds.');
     });
+  },
+  'key-new'(el) {
+    if (apiKeyInfo?.active && !confirm('Make a new API key? The old one stops working right away, so update it in Muse.')) return;
+    busy(el, 'Generating…', async () => {
+      const { api_key, created_at } = await cloud.regenerateApiKey(state.cloud);
+      freshApiKey = api_key;
+      apiKeyInfo = { active: true, created_at };
+      render();
+    });
+  },
+  'key-revoke'(el) {
+    if (!confirm('Revoke the API key? Muse will lose access until you generate a new one.')) return;
+    busy(el, 'Revoking…', async () => {
+      await cloud.revokeApiKey(state.cloud);
+      freshApiKey = null;
+      apiKeyInfo = { active: false, created_at: null };
+      render();
+    });
+  },
+  async 'key-copy'() {
+    try {
+      await navigator.clipboard.writeText(freshApiKey);
+      toast('API key copied.');
+    } catch {
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('api-key'));
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      toast('Press and hold to copy the selected key.');
+    }
   },
   export(el) {
     busy(el, 'Preparing…', async () => {
@@ -1102,16 +1248,13 @@ screen.addEventListener('change', async (e) => {
   }
   const setting = t.dataset.setting;
   if (setting) {
-    const value = setting === 'sound' ? t.checked : setting === 'graceHour' ? Number(t.value) : t.value;
+    const value = t.type === 'checkbox' ? t.checked : setting === 'graceHour' ? Number(t.value) : t.value;
     if (setting === 'reminderTime' && !value) return;
     state = { ...state, settings: { ...state.settings, [setting]: value } };
-    save();
+    save(); // also syncs the reminder time to the backend
     applySettings();
     if (setting === 'graceHour' && evaluateNow()) render();
-    if (setting === 'reminderTime') {
-      if (state.reminders.on) R.updateSettings(state.reminders, { reminderTime: value }).catch((err) => toast(err.message));
-      render();
-    }
+    if (setting === 'reminderTime') render();
   }
 });
 
