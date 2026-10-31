@@ -1,6 +1,9 @@
 // On-device storage: one IndexedDB database with the app state and the photos.
 
-const DB_NAME = 'ironclad-75';
+import { isDebug } from './clock.js';
+
+// Test mode gets its own practice database so it can't touch the real log.
+const DB_NAME = isDebug ? 'ironclad-75-test' : 'ironclad-75';
 const DB_VERSION = 1;
 let dbPromise;
 

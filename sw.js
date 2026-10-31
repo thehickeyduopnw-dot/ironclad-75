@@ -6,7 +6,7 @@
 import { dateKey, dayNumber, missingTasks } from './js/challenge.js';
 import { loadState } from './js/store.js';
 
-const VERSION = 'ironclad-v5';
+const VERSION = 'ironclad-v6';
 const SHELL = [
   './',
   './index.html',
@@ -43,9 +43,14 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
 
+  // Only the app's own page shares the index.html cache slot (not e.g. /tests/).
+  const scope = new URL(self.registration.scope).pathname;
+  const path = new URL(req.url).pathname;
+  const isApp = req.mode === 'navigate' && (path === scope || path === `${scope}index.html`);
+
   event.respondWith(
     caches.open(VERSION).then(async (cache) => {
-      const key = req.mode === 'navigate' ? './index.html' : req;
+      const key = isApp ? './index.html' : req;
       const cached = await cache.match(key, { ignoreSearch: true });
       const network = fetch(req)
         .then((res) => {

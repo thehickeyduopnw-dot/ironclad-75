@@ -19,6 +19,7 @@ let viewKey = null; // day shown on Today: today, or yesterday during the grace 
 let openSignature = '';
 let celebrated = false; // confetti plays once per win screen
 let installPrompt = null; // Chrome/Android's deferred install prompt
+let storageBroken = false; // saved data failed to load: don't overwrite it
 let calRun = null; // calendar: null = current run, else index into state.attempts
 let calKey = null; // calendar: selected date
 let photoList = []; // sorted date keys that have a stored photo
@@ -37,16 +38,28 @@ const CHECK = '<span class="check" aria-hidden="true"><svg viewBox="0 0 24 24"><
 
 // ---- Startup -------------------------------------------------------------
 
+// Fill in fields added by newer versions of the app.
+function withDefaults(s) {
+  return {
+    ...s,
+    settings: { ...C.defaultState().settings, ...s.settings },
+    profile: { ...K.defaultProfile(), ...s.profile },
+    reminders: { url: '', token: '', on: false, ...s.reminders },
+  };
+}
+
 async function init() {
   try {
-    state = (await store.loadState()) ?? C.defaultState();
+    state = withDefaults((await store.loadState()) ?? C.defaultState());
   } catch (err) {
-    state = C.defaultState();
-    toast(`Storage unavailable: ${err.message}`);
+    // Never fall back to a blank log that the next save would write over the real one.
+    storageBroken = true;
+    state = withDefaults(C.defaultState());
+    toast(`Couldn't open this phone's saved data (${err.message}). Close and reopen the app; nothing will be saved until it loads.`);
   }
-  state.settings = { ...C.defaultState().settings, ...state.settings };
-  state.profile = { ...K.defaultProfile(), ...state.profile };
-  state.reminders = { url: '', token: '', on: false, ...state.reminders };
+  if (clock.isDebug) document.body.classList.add('test-mode');
+  // A reload keeps the old history entry; the app always starts on Today.
+  if (history.state?.tab) history.replaceState(null, '');
   applySettings();
   await refreshPhotoList();
   evaluateNow();
@@ -63,7 +76,14 @@ async function init() {
 }
 
 // Re-check the rules as time passes (midnight, end of the grace window).
-function tick(force) {
+// Coming back to the foreground also reloads saved data, in case the app was
+// changed in another window (e.g. a Chrome tab and the installed app).
+async function tick(force) {
+  if (force && !storageBroken) {
+    const saved = await store.loadState().catch(() => null);
+    if (saved) state = withDefaults(saved);
+    await refreshPhotoList();
+  }
   const changed = evaluateNow();
   const sig = currentOpenSignature();
   if (changed || force || sig !== openSignature) render();
@@ -82,6 +102,7 @@ function evaluateNow() {
 }
 
 function save() {
+  if (storageBroken) return;
   store.saveState(state).catch((err) => toast(`Couldn't save: ${err.message}`));
   R.syncStatus(state.reminders, reminderStatus());
 }
@@ -353,7 +374,7 @@ function onboarding() {
     <button class="btn-primary" data-action="start-today">Start Day 1 today</button>
     <div class="alt-start">
       <label for="start-date" class="muted">Or start on another date</label>
-      <div class="row"><input type="date" id="start-date" class="field" value="${C.dateKey(clock.now())}"><button class="btn-secondary" data-action="start-on-date">Set</button></div>
+      <div class="row"><input type="date" id="start-date" class="field" min="${earliestStart()}" value="${C.dateKey(clock.now())}"><button class="btn-secondary" data-action="start-on-date">Set</button></div>
     </div>
     ${installPrompt && !isInstalled() ? '<button class="btn-secondary install-btn" data-action="install">Install app on this phone</button>' : ''}
   </section>`;
@@ -412,7 +433,7 @@ function renderSettings() {
     <div class="group">
       <div class="setting col">
         <label for="set-start">Start date${a ? '' : ' (not started)'}</label>
-        <div class="row"><input type="date" id="set-start" class="field" value="${a ? a.startDate : C.dateKey(clock.now())}"><button class="btn-secondary" data-action="change-start">Change</button></div>
+        <div class="row"><input type="date" id="set-start" class="field" min="${earliestStart()}" value="${a ? a.startDate : C.dateKey(clock.now())}"><button class="btn-secondary" data-action="change-start">Change</button></div>
         <small class="muted">Changing it starts a new run. Days before today count as done off-app.</small>
       </div>
       <div class="setting">
@@ -455,7 +476,8 @@ function renderCalendar() {
     return `<section class="empty"><p class="eyebrow">Calendar</p><h2>No run yet</h2><p class="muted">Start your challenge on the Today tab.</p></section>`;
   }
   if (calRun != null && !runs[calRun]) calRun = null;
-  if (calRun == null && !state.attempt) calRun = runs.length - 1;
+  const activeRun = state.attempt?.status === 'active';
+  if (calRun == null && !activeRun) calRun = runs.length - 1; // a finished run is already in history
   const run = calRun == null ? state.attempt : runs[calRun];
   const now = clock.now();
   const today = C.dateKey(now);
@@ -480,7 +502,7 @@ function renderCalendar() {
   }
 
   const options = [
-    ...(state.attempt ? [`<option value="" ${calRun == null ? 'selected' : ''}>Current · Attempt #${runs.length + 1}</option>`] : []),
+    ...(activeRun ? [`<option value=""${calRun == null ? 'selected' : ''}>Current · Attempt #${runs.length + 1}</option>`] : []),
     ...runs.map((r, i) => `<option value="${i}" ${calRun === i ? 'selected' : ''}>#${i + 1} · ${fmtDate(r.startDate, { month: 'short', day: 'numeric' })} – ${fmtDate(r.endDate, { month: 'short', day: 'numeric' })} · ${r.result}</option>`).reverse(),
   ].join('');
 
@@ -761,14 +783,14 @@ function installRow() {
 function debugPanel() {
   return `<div class="group debug">
     <h3>Test tools</h3>
-    <p class="muted">Simulated time: <b>${clock.now().toLocaleString()}</b></p>
+    <p class="muted">Practice data only: your real log isn't touched. Simulated time: <b>${clock.now().toLocaleString()}</b></p>
     <div class="btn-grid">
       <button class="btn-secondary" data-action="dbg" data-v="hour">+1 hour</button>
       <button class="btn-secondary" data-action="dbg" data-v="day">+1 day</button>
       <button class="btn-secondary" data-action="dbg" data-v="midnight">Jump to 11:59 PM</button>
       <button class="btn-secondary" data-action="dbg" data-v="fill">Complete viewed day</button>
       <button class="btn-secondary" data-action="dbg" data-v="reset">Real time</button>
-      <button class="btn-secondary" data-action="dbg" data-v="off">Hide test tools</button>
+      <button class="btn-secondary" data-action="dbg" data-v="off">Leave test mode</button>
     </div>
   </div>`;
 }
@@ -777,6 +799,13 @@ function debugPanel() {
 
 // Apply a change to one day's log, then give feedback for anything newly finished.
 function updateDay(key, mutate, { rerender = true } = {}) {
+  // The 20-second clock check may lag: make sure this day is still open first.
+  evaluateNow();
+  if (state.attempt?.status !== 'active' || !C.openKeys(clock.now(), state.settings.graceHour).includes(key)) {
+    render();
+    toast('That day has closed.');
+    return { gained: [] };
+  }
   const before = C.normalizeDay(state.days[key]);
   const prev = C.taskState(before);
   const wasComplete = C.isDayComplete(before);
@@ -801,8 +830,15 @@ function updateDay(key, mutate, { rerender = true } = {}) {
   return { gained };
 }
 
+// Further back than this, the "done off-app" days alone would finish the challenge.
+const earliestStart = () => C.addDays(C.dateKey(clock.now()), -(C.TOTAL_DAYS - 1));
+
 function startRun(startKey) {
   const today = C.dateKey(clock.now());
+  if (startKey < earliestStart()) {
+    toast(`The start date can be at most ${C.TOTAL_DAYS - 1} days ago.`);
+    return;
+  }
   if (startKey < today) {
     const days = C.daysBetween(startKey, today);
     if (!confirm(`Start on ${fmtDate(startKey)}? The ${days} day${days === 1 ? '' : 's'} before today will count as completed off-app.`)) return;
@@ -810,8 +846,15 @@ function startRun(startKey) {
   state = C.restart(state, startKey, clock.now());
   viewKey = null;
   save();
+  showToday();
+}
+
+// Jump straight to Today, keeping the back-button history in step with the tab.
+function showToday() {
+  if (history.state?.tab) history.replaceState(null, '');
   tab = 'today';
   render();
+  window.scrollTo(0, 0);
 }
 
 const actions = {
@@ -930,8 +973,7 @@ const actions = {
     state = { ...state, pendingEvent: null };
     save();
     viewKey = null;
-    tab = 'today';
-    render();
+    showToday();
   },
   dbg(el) {
     const v = el.dataset.v;

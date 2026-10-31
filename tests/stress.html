@@ -1,0 +1,250 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Ironclad 75 stress tests</title>
+<style>body{font:15px/1.5 system-ui;margin:20px} .pass{color:green} .fail{color:#c00;font-weight:bold} .info{color:#555}</style>
+<h1>Stress tests</h1>
+<p>Open as <code>/tests/stress.html?debug</code> so the backup test uses practice data. Takes about a minute.</p>
+<pre id="out"></pre>
+<script type="module">
+import * as C from '../js/challenge.js';
+import * as store from '../js/store.js';
+import * as B from '../js/backup.js';
+import { isDebug } from '../js/clock.js';
+
+const out = document.getElementById('out');
+let failed = 0;
+const log = (cls, msg) => { out.innerHTML += `<span class="${cls}">${msg}</span>\n`; };
+async function test(name, fn) {
+  const t0 = performance.now();
+  try { const note = await fn(); log('pass', `✓ ${name} (${Math.round(performance.now() - t0)} ms)${note ? ` · ${note}` : ''}`); }
+  catch (e) { failed++; log('fail', `✗ ${name}: ${e.message}`); console.error(e); }
+}
+const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+// Small seeded random generator so failures can be replayed.
+function rng(seed) {
+  return () => { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+function fullDay(title = 'Book') {
+  return { workout1: { done: true, outdoor: true }, workout2: { done: true, outdoor: false }, diet: true, alcohol: true, water: 128, reading: { title, pages: 10 }, photo: true };
+}
+
+// ---- 1. Randomized simulation of the reset rules ------------------------------------
+// Steps hour by hour (real local time, so DST is included). A simulated user opens the
+// app at random times and finishes each day early, late (in the grace window), only
+// partly, or not at all. Invariants are checked after every app open.
+function simulate(seed) {
+  const r = rng(seed);
+  const pick = (arr) => arr[Math.floor(r() * arr.length)];
+  let state = C.defaultState();
+  state.settings.graceHour = pick([0, 1, 3, 3, 3, 4]);
+  const grace = state.settings.graceHour;
+  // Start dates spread over 2026, with extra weight around both DST changes.
+  const startKey = pick([C.addDays('2026-01-01', Math.floor(r() * 365)), C.addDays('2026-03-01', Math.floor(r() * 14)), C.addDays('2026-10-25', Math.floor(r() * 14))]);
+  let ms = C.parseKey(startKey).getTime() + 7 * 3600e3;
+  state = C.restart(state, startKey, new Date(ms));
+
+  const failP = pick([0, 0.002, 0.01, 0.03, 0.1]); // chance a day goes unfinished
+  const days = 150;
+  const plan = {}; // dateKey -> { kind, hour }
+  const filled = new Set(); // days the user actually finished while they were open
+  let wins = 0;
+  const end = ms + days * 86400e3;
+  let away = 0; // hours left of a multi-day absence
+
+  const planFor = (key) => {
+    if (!plan[key]) {
+      const x = r();
+      const kind = x < failP ? pick(['skip', 'partial']) : x < failP + 0.08 ? 'late' : 'complete';
+      plan[key] = { kind, hour: kind === 'late' ? Math.floor(r() * 4) : 6 + Math.floor(r() * 18) };
+    }
+    return plan[key];
+  };
+
+  const open = (now) => {
+    const res = C.evaluate(state, now);
+    if (res.event?.type === 'won') wins++;
+    state = { ...res.state, pendingEvent: null };
+    assert(C.evaluate(state, now).state === state, `seed ${seed}: evaluate not idempotent`);
+    checkInvariants(now);
+  };
+
+  const fill = (key, now, complete) => {
+    const a = state.attempt;
+    // Same guard as the app: only open days of an active run can be edited.
+    open(now);
+    if (state.attempt.status !== 'active' || key < state.attempt.startDate) return;
+    if (!C.openKeys(now, grace).includes(key)) return;
+    const d = fullDay();
+    if (!complete) d[pick(['diet', 'alcohol', 'photo'])] = false;
+    state = { ...state, days: { ...state.days, [key]: d } };
+    if (complete) filled.add(key);
+  };
+
+  function checkInvariants(now) {
+    const a = state.attempt;
+    const closed = C.lastClosedKey(now, grace);
+    if (a.status === 'active') {
+      for (let k = a.startDate; k <= closed; k = C.addDays(k, 1)) {
+        assert(C.isDayComplete(state.days[k]), `seed ${seed}: closed day ${k} incomplete in active run`);
+      }
+    }
+    let prevEnd = '';
+    for (const rec of state.attempts) {
+      assert(rec.startDate > prevEnd || rec.startDate === prevEnd, `seed ${seed}: runs overlap`);
+      prevEnd = rec.endDate;
+      for (let k = rec.startDate; k < rec.endDate; k = C.addDays(k, 1)) {
+        assert(C.isDayComplete(state.days[k]), `seed ${seed}: day ${k} inside run #${rec.startDate} incomplete`);
+      }
+      if (rec.result === 'reset') {
+        assert(!filled.has(rec.endDate), `seed ${seed}: finished day ${rec.endDate} caused a reset`);
+        assert(!C.isDayComplete(state.days[rec.endDate]), `seed ${seed}: reset on a complete day`);
+        assert(rec.daysCompleted === C.dayNumber(rec.startDate, rec.endDate) - 1, `seed ${seed}: daysCompleted mismatch`);
+      }
+      if (rec.result === 'completed') assert(rec.daysCompleted === 75 && C.dayNumber(rec.startDate, rec.endDate) === 75, `seed ${seed}: bad win record`);
+    }
+  }
+
+  while (ms < end) {
+    const now = new Date(ms);
+    const today = C.dateKey(now);
+    const h = now.getHours();
+    // Finish today (or yesterday, for "late") at the planned hour.
+    const p = planFor(today);
+    if ((p.kind === 'complete' || p.kind === 'partial') && h === p.hour) fill(today, now, p.kind === 'complete');
+    const y = C.addDays(today, -1);
+    const py = planFor(y);
+    if (py.kind === 'late' && h === py.hour) fill(y, now, true);
+    // Random app opens, with occasional multi-day absences.
+    if (away > 0) away--;
+    else if (r() < 0.004) away = 24 * (1 + Math.floor(r() * 10));
+    else if (r() < 0.15) open(now);
+    if (state.attempt.status === 'completed') state = C.restart(state, C.dateKey(now), now);
+    ms += 3600e3;
+  }
+  open(new Date(ms));
+  return { wins, attempts: state.attempts.length, grace };
+}
+
+await test('2,000 randomized runs: reset rules hold after every app open', () => {
+  let wins = 0, attempts = 0;
+  for (let seed = 1; seed <= 2000; seed++) {
+    const res = simulate(seed);
+    wins += res.wins;
+    attempts += res.attempts;
+  }
+  assert(wins > 0, 'no simulated run ever won');
+  return `${attempts} finished runs, ${wins} wins`;
+});
+
+await test('a perfect run wins exactly when day 75 closes', () => {
+  for (const start of ['2026-01-05', '2026-02-20', '2026-09-01', '2026-12-30']) {
+    let s = C.restart(C.defaultState(), start, C.parseKey(start));
+    for (let i = 0; i < 75; i++) s.days[C.addDays(start, i)] = fullDay();
+    const day75 = C.addDays(start, 74);
+    const beforeClose = C.parseKey(C.addDays(day75, 1)); beforeClose.setHours(2, 59);
+    assert(C.evaluate(s, beforeClose).event === null, `${start}: won before day 75 closed`);
+    const afterClose = C.parseKey(C.addDays(day75, 1)); afterClose.setHours(3, 0);
+    const res = C.evaluate(s, afterClose);
+    assert(res.event?.type === 'won', `${start}: no win after day 75 closed`);
+    const st = C.computeStats(res.state, afterClose);
+    assert(st.currentStreak === 75 && st.longestStreak === 75 && st.daysCompleted === 75, `${start}: stats after win`);
+  }
+});
+
+await test('coming back after 3 months away resets once, at the first missed day', () => {
+  let s = C.restart(C.defaultState(), '2026-03-01', C.parseKey('2026-03-01'));
+  for (let i = 0; i < 10; i++) s.days[C.addDays('2026-03-01', i)] = fullDay();
+  const res = C.evaluate(s, C.parseKey('2026-06-15'));
+  assert(res.event.failedDay === 11 && res.state.attempts.length === 1, 'wrong reset');
+  assert(res.state.attempt.startDate === '2026-06-15', 'new run should start today');
+});
+
+// ---- 2. Large history ---------------------------------------------------------------
+await test('3 years of logs and 100 past attempts: stats, calendar, photo lookup stay fast', () => {
+  const s = C.defaultState();
+  let k = '2024-01-01';
+  for (let i = 0; i < 100; i++) {
+    const len = 3 + (i % 9);
+    for (let j = 0; j < len; j++) s.days[C.addDays(k, j)] = fullDay(`Book ${i % 17}`);
+    s.attempts.push({ id: String(i), startDate: k, endDate: C.addDays(k, len), result: 'reset', daysCompleted: len, missing: ['Water', 'Reading'].slice(0, 1 + (i % 2)) });
+    k = C.addDays(k, len + 1);
+  }
+  while (k < '2026-12-01') { s.days[k] = fullDay(); k = C.addDays(k, 1); }
+  s.attempt = C.newAttempt('2026-10-01');
+  const now = C.parseKey('2026-11-20');
+  const t0 = performance.now();
+  for (let i = 0; i < 20; i++) C.computeStats(s, now);
+  const statsMs = (performance.now() - t0) / 20;
+  const t1 = performance.now();
+  for (let i = 0; i < 75; i++) C.runDayStatus(s, s.attempt, C.addDays('2026-10-01', i), now);
+  for (const key of Object.keys(s.days)) C.runForKey(s, key);
+  const lookupMs = performance.now() - t1;
+  assert(statsMs < 50, `stats took ${statsMs.toFixed(1)} ms`);
+  assert(lookupMs < 200, `lookups took ${lookupMs.toFixed(1)} ms`);
+  return `${Object.keys(s.days).length} days; stats ${statsMs.toFixed(1)} ms; calendar + ${Object.keys(s.days).length} photo lookups ${lookupMs.toFixed(0)} ms`;
+});
+
+// ---- 3. Full-size backup (practice database only) -------------------------------------
+await test('backup with 75 full-size photos: export, import, byte-for-byte', async () => {
+  assert(isDebug, 'open with ?debug so this uses practice data');
+  // Phone-like photos: 1200x1600 JPEG with texture, roughly the size the app saves.
+  const canvas = document.createElement('canvas');
+  canvas.width = 1200; canvas.height = 1600;
+  const g = canvas.getContext('2d');
+  const s = C.defaultState();
+  s.attempt = C.newAttempt('2026-08-01');
+  const keys = [];
+  for (let i = 0; i < 75; i++) {
+    const key = C.addDays('2026-08-01', i);
+    const grad = g.createLinearGradient(0, 0, 1200, 1600);
+    grad.addColorStop(0, `hsl(${i * 5} 40% 40%)`); grad.addColorStop(1, `hsl(${i * 5 + 90} 40% 20%)`);
+    g.fillStyle = grad; g.fillRect(0, 0, 1200, 1600);
+    for (let n = 0; n < 2500; n++) { g.fillStyle = `rgba(255,255,255,${Math.random() * 0.25})`; g.fillRect(Math.random() * 1200, Math.random() * 1600, 2 + Math.random() * 20, 2 + Math.random() * 20); }
+    await store.putPhoto(key, await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.85)));
+    s.days[key] = fullDay();
+    keys.push(key);
+  }
+  await store.saveState(s);
+  const sample = (await store.getPhoto(keys[40])).blob;
+
+  let captured;
+  const click = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function () { captured = this.href; };
+  const t0 = performance.now();
+  const res = await B.exportBackup(s);
+  HTMLAnchorElement.prototype.click = click;
+  const exportMs = performance.now() - t0;
+  const file = new File([await (await fetch(captured)).blob()], 'backup.json');
+
+  await store.clearPhotos();
+  await store.saveState(C.defaultState());
+  const t1 = performance.now();
+  await B.restoreBackup(await B.readBackup(file));
+  const importMs = performance.now() - t1;
+
+  const back = await store.loadState();
+  const photoKeys = await store.photoKeys();
+  const restored = (await store.getPhoto(keys[40])).blob;
+  const a = new Uint8Array(await sample.arrayBuffer()), b = new Uint8Array(await restored.arrayBuffer());
+  assert(a.length === b.length && a.every((x, i) => x === b[i]), 'restored photo differs');
+  assert(photoKeys.length === 75 && Object.keys(back.days).length === 75, 'counts differ after restore');
+  assert(back.reminders.on === false, 'reminders should be off after import');
+  const est = await navigator.storage?.estimate?.();
+  return `${(res.bytes / 1048576).toFixed(1)} MB file (avg photo ${(sample.size / 1024).toFixed(0)} KB); export ${(exportMs / 1000).toFixed(1)} s, import ${(importMs / 1000).toFixed(1)} s${est ? `; browser quota ${(est.quota / 1073741824).toFixed(1)} GB` : ''}`;
+});
+
+await test('importing a damaged or foreign file changes nothing', async () => {
+  const before = JSON.stringify(await store.loadState());
+  for (const text of ['not json', '{"app":"other"}', '{"app":"ironclad-75","state":{}}']) {
+    let threw = false;
+    try { await B.restoreBackup(await B.readBackup(new File([text], 'x.json'))); } catch { threw = true; }
+    assert(threw, `accepted: ${text}`);
+  }
+  assert(JSON.stringify(await store.loadState()) === before, 'state changed');
+});
+
+out.innerHTML += failed ? `\n<span class="fail">${failed} FAILED</span>` : '\n<span class="pass">ALL PASSED</span>';
+document.title = failed ? 'FAILED' : 'PASSED';
+</script>

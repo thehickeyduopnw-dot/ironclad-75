@@ -1,20 +1,30 @@
-// The app's notion of "now". In debug mode (open the app with ?debug once)
-// Settings gets time-travel buttons so the midnight reset can be tested without waiting.
+// The app's notion of "now". Test mode (open the app with ?debug) adds time-travel
+// buttons to Settings so the midnight reset can be tested without waiting.
+// Test mode lasts only for that browser tab and uses separate practice data
+// (see store.js), so it can never touch the real log or the installed app's clock.
 
-const OFFSET_KEY = 'ironclad.clockOffset';
 const DEBUG_KEY = 'ironclad.debug';
+const OFFSET_KEY = 'ironclad.clockOffset';
 
-function read(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
+function session(key, value) {
+  try {
+    if (value === undefined) return sessionStorage.getItem(key);
+    if (value === null) sessionStorage.removeItem(key);
+    else sessionStorage.setItem(key, value);
+  } catch {}
+  return null;
 }
-function write(key, value) {
-  try { value == null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch {}
-}
 
-if (new URLSearchParams(location.search).has('debug')) write(DEBUG_KEY, '1');
+// Older versions kept test mode in localStorage, which the installed app shares.
+try {
+  localStorage.removeItem(DEBUG_KEY);
+  localStorage.removeItem(OFFSET_KEY);
+} catch {}
 
-export const isDebug = read(DEBUG_KEY) === '1';
-let offset = isDebug ? Number(read(OFFSET_KEY) || 0) : 0;
+if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('debug')) session(DEBUG_KEY, '1');
+
+export const isDebug = session(DEBUG_KEY) === '1';
+let offset = isDebug ? Number(session(OFFSET_KEY) || 0) : 0;
 
 export function now() {
   return new Date(Date.now() + offset);
@@ -22,15 +32,15 @@ export function now() {
 
 export function shiftClock(ms) {
   offset += ms;
-  write(OFFSET_KEY, String(offset));
+  session(OFFSET_KEY, String(offset));
 }
 
 export function resetClock() {
   offset = 0;
-  write(OFFSET_KEY, null);
+  session(OFFSET_KEY, null);
 }
 
 export function disableDebug() {
   resetClock();
-  write(DEBUG_KEY, null);
+  session(DEBUG_KEY, null);
 }

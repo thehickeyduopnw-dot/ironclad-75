@@ -46,11 +46,17 @@ export async function readBackup(file) {
   return data;
 }
 
-// Replaces everything on this device with the backup.
+// Replaces everything on this device with the backup. Photos are written first and
+// old ones removed last, so a failure partway never leaves the log without its photos.
 export async function restoreBackup(data) {
-  await store.clearPhotos();
-  for (const [key, url] of Object.entries(data.photos || {})) {
+  const photos = data.photos || {};
+  for (const [key, url] of Object.entries(photos)) {
     await store.putPhoto(key, await (await fetch(url)).blob());
   }
-  await store.saveState(data.state);
+  // Reminders point at the old phone's push address; they're re-enabled from Settings.
+  const reminders = { url: '', token: '', ...data.state.reminders, on: false };
+  await store.saveState({ ...data.state, reminders });
+  for (const key of await store.photoKeys()) {
+    if (!(key in photos)) await store.deletePhoto(key);
+  }
 }

@@ -67,8 +67,8 @@ powershell -ExecutionPolicy Bypass -File tools\serve.ps1
 ```
 
 - http://localhost:8080 is the app.
-- http://localhost:8080/?debug adds **Test tools** to Settings: +1 hour, +1 day, jump to 11:59 PM, and complete the viewed day, so you can watch the midnight reset.
-- http://localhost:8080/tests/ runs the tests.
+- http://localhost:8080/?debug turns on **test mode** for that browser tab: an orange "TEST MODE" stripe, separate practice data (your real log is never touched), and **Test tools** in Settings (+1 hour, +1 day, jump to 11:59 PM, complete the viewed day) for watching the midnight reset. Adding `?debug` to the live link works the same way.
+- http://localhost:8080/tests/ runs the tests. http://localhost:8080/tests/stress.html?debug runs the stress tests (about 3 minutes): 2,000 simulated runs, a large history, and a 75-photo backup.
 
 ## Updating
 
