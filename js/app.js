@@ -273,7 +273,10 @@ function renderToday() {
   const today = C.dateKey(now);
   const a = state.attempt;
 
-  if (!a) return prepFor === 'start' ? prepView() : onboarding();
+  if (!a) {
+    if (prepFor === 'start') return prepView();
+    return state.attempts.length || state.explored ? idleView() : onboarding();
+  }
   if (a.status === 'completed') return victory();
   if (prepFor === 'restart') return prepView();
   if (a.startDate > today) {
@@ -546,6 +549,7 @@ function onboarding() {
     <ol class="rules">${items.map((i) => `<li>${i}</li>`).join('')}</ol>
     <p class="lead">Miss anything by midnight and you're back to Day 1.</p>
     <button class="btn-primary" data-action="prep-next">Next: set your calories &amp; macros</button>
+    <button class="btn-link" data-action="explore">Look around first: nothing counts until you start</button>
     ${installPrompt && !isInstalled() ? '<button class="btn-secondary install-btn" data-action="install">Install app on this phone</button>' : ''}
     ${isIOS && !isInstalled() ? `<p class="banner ios-install"><b>Install first.</b> On iPhone, the home-screen app keeps its own log, separate from Safari. ${installHelp()}</p>` : ''}
   </section>`;
@@ -578,7 +582,24 @@ function victory() {
     <p class="eyebrow">Attempt #${state.attempts.length}</p>
     <h1 class="mega">75<span>/75</span></h1>
     <p class="lead">Challenge complete. Every task, every day.</p>
-    <button class="btn-primary" data-action="start-today">Start a new run</button>
+    <button class="btn-primary" data-action="prep-next">Start a new run</button>
+    <button class="btn-link" data-action="end-run">Not now</button>
+  </section>`;
+}
+
+// No run going: the whole app is usable and nothing counts until the user starts.
+function idleView() {
+  const last = state.attempts[state.attempts.length - 1];
+  const lastLine = !last ? ''
+    : last.result === 'reset' ? `Your last run (attempt #${state.attempts.length}) ended on Day ${last.failedDay}, ${fmtDate(last.endDate, { month: 'short', day: 'numeric' })}.`
+    : last.result === 'completed' ? `Your last run was a full 75 days. Nice.`
+    : `Your last run (attempt #${state.attempts.length}) stopped after ${last.daysCompleted} day${last.daysCompleted === 1 ? '' : 's'}.`;
+  return `<section class="hero-msg idle">
+    <p class="eyebrow">${state.attempts.length ? `Next up: attempt #${attemptNumber()}` : 'Not started'}</p>
+    <h1 class="title">Ready when<br><span class="accent">you are.</span></h1>
+    <p class="lead">Nothing counts until you start. Look around, set your calories and macros, and start the challenge when you're ready.</p>
+    ${lastLine ? `<p class="muted">${lastLine}</p>` : ''}
+    <button class="btn-primary" data-action="prep-next">Start the challenge</button>
   </section>`;
 }
 
@@ -599,7 +620,7 @@ function renderOverlay() {
   }
   overlay.innerHTML = `<div class="sheet reset" role="dialog" aria-modal="true" aria-labelledby="ov-title">
     <p class="eyebrow">Attempt #${e.attemptNumber} ended</p>
-    <h1 id="ov-title" class="title">Back to<br><span class="danger">Day 1</span></h1>
+    <h1 id="ov-title" class="title">Run<br><span class="danger">ended</span></h1>
     <p class="lead">Day ${e.failedDay} (${fmtDate(e.endDate)}) wasn't finished.</p>
     <p class="missing">Missed: ${e.missing.map(esc).join(', ')}</p>
     <div class="stat-row">
@@ -607,7 +628,9 @@ function renderOverlay() {
       <div><b>${bestRun()}</b><span>best run</span></div>
       <div><b>${state.attempts.length}</b><span>attempts so far</span></div>
     </div>
-    <button class="btn-primary" data-action="ack">Next: prep for Day 1</button>
+    <p class="muted">Nothing new starts until you're ready.</p>
+    <button class="btn-primary" data-action="ack" data-next="prep">Start again: prep for Day 1</button>
+    <button class="btn-link" data-action="ack">Not now</button>
   </div>`;
 }
 
@@ -615,7 +638,8 @@ function renderSettings() {
   const st = state.settings;
   const a = state.attempt;
   const history = [...state.attempts].reverse();
-  const resultLabel = { reset: 'Reset', completed: 'Completed', restarted: 'Restarted' };
+  const resultLabel = { reset: 'Reset', completed: 'Completed', restarted: 'Restarted', stopped: 'Ended' };
+  const active = a?.status === 'active';
   const graceOpts = [0, 1, 2, 3, 4].map((h) => `<option value="${h}" ${st.graceHour === h ? 'selected' : ''}>${h === 0 ? 'None (strict midnight)' : `Until ${h}:00 AM`}</option>`).join('');
   const themeOpts = [['system', 'Match phone'], ['dark', 'Dark'], ['light', 'Light']].map(([v, l]) => `<option value="${v}" ${st.theme === v ? 'selected' : ''}>${l}</option>`).join('');
 
@@ -624,11 +648,11 @@ function renderSettings() {
     ${installRow()}
 
     <div class="group">
-      <div class="setting col">
-        <label for="set-start">Start date${a ? '' : ' (not started)'}</label>
-        <div class="row"><input type="date" id="set-start" class="field" min="${earliestStart()}" value="${a ? a.startDate : C.dateKey(clock.now())}"><button class="btn-secondary" data-action="change-start">Change</button></div>
+      ${active ? `<div class="setting col">
+        <label for="set-start">Start date</label>
+        <div class="row"><input type="date" id="set-start" class="field" min="${earliestStart()}" value="${a.startDate}"><button class="btn-secondary" data-action="change-start">Change</button></div>
         <small class="muted">Changing it starts a new run. Days before today count as done off-app.</small>
-      </div>
+      </div>` : `<div class="setting"><span>Challenge</span><span class="muted">Not started · start it from Today</span></div>`}
       <div class="setting">
         <label for="set-grace">Grace window</label>
         <select id="set-grace" data-setting="graceHour">${graceOpts}</select>
@@ -655,7 +679,10 @@ function renderSettings() {
     ${remindersGroup()}
     ${cloudGroup()}
     ${backupGroup()}
-    ${a ? '<div class="group"><button class="btn-danger" data-action="restart">Restart challenge</button></div>' : ''}
+    ${active ? `<div class="group">
+      <button class="btn-danger" data-action="end-run">End this run</button>
+      <small class="muted pad-b block">Stops attempt #${attemptNumber()} without starting another. If no day is finished yet, it isn't counted as an attempt.</small>
+    </div>` : ''}
     ${clock.isDebug ? debugPanel() : ''}
   </section>`;
 }
@@ -1410,12 +1437,29 @@ const actions = {
     if (!confirm('Restart the challenge at Day 1 today? Your current run goes into history.')) return;
     startRun(C.dateKey(clock.now()));
   },
-  ack() {
-    if (state.pendingEvent?.type === 'reset') prepFor = 'restart'; // review calories & macros first
+  // Dismiss the run-ended / finished screen. "Start again" goes to prep; "Not now"
+  // leaves the app idle until the user starts.
+  ack(el) {
+    prepFor = el?.dataset.next === 'prep' ? 'start' : null;
     state = { ...state, pendingEvent: null };
     save();
     viewKey = null;
     showToday();
+  },
+  'end-run'() {
+    const a = state.attempt;
+    if (a?.status === 'active' && !confirm(`End attempt #${attemptNumber()}? Nothing new starts until you start the challenge again.`)) return;
+    state = C.endRun(state, clock.now());
+    prepFor = null;
+    viewKey = null;
+    save();
+    showToday();
+  },
+  explore() {
+    state = { ...state, explored: true };
+    save();
+    render();
+    window.scrollTo(0, 0);
   },
   'prep-next'() {
     prepFor = 'start';

@@ -77,13 +77,14 @@ test('strict mode (grace 0) resets right after midnight', () => {
   eq(C.evaluate(s, at('2026-11-01', 0)).event?.type, 'reset');
 });
 
-test('missed day resets to Day 1 today and records history', () => {
+test('missed day ends the run, records history, and starts nothing new', () => {
   const s = started('2026-10-01');
   for (let k = '2026-10-01'; k < '2026-10-23'; k = C.addDays(k, 1)) s.days[k] = fullDay();
   const { state, event } = C.evaluate(s, at('2026-10-25', 9));
   eq(event.failedDay, 23);
   eq(event.daysCompleted, 22);
-  eq(state.attempt.startDate, '2026-10-25');
+  eq(state.attempt, null); // no new attempt until the user starts one
+  eq(C.evaluate(state, at('2026-11-30', 9)).event, null); // idle: nothing more happens
   eq(state.attempts.length, 1);
   eq(state.attempts[0].result, 'reset');
   eq(state.pendingEvent.type, 'reset');
@@ -572,19 +573,27 @@ await test('#5 GET /reminder reads the current reminder', async () => {
   eq((await api(env, 'GET', '/reminder', { key })).data, { time: '21:45', enabled: false });
 });
 
-await test('#7 grace-window reset keeps a completed yesterday as Day 1', () => {
-  // Oct 29 was missed. At 1 AM on Oct 31 (grace window), Oct 30 is still open and complete.
+await test('a reset waits for a manual start; the next attempt is numbered after it', () => {
   const s = started('2026-10-25');
   for (let k = '2026-10-25'; k < '2026-10-29'; k = C.addDays(k, 1)) s.days[k] = fullDay();
-  s.days['2026-10-30'] = fullDay();
   const { state, event } = C.evaluate(s, at('2026-10-31', 1));
-  eq([event.type, event.failedDay], ['reset', 5]);
-  eq(state.attempt.startDate, '2026-10-30');
-  eq(C.evaluate(state, at('2026-10-31', 4)).event, null); // Oct 30 counts as a finished Day 1
-  // Unfinished yesterday: the new run starts today instead.
-  const s2 = started('2026-10-25');
-  for (let k = '2026-10-25'; k < '2026-10-29'; k = C.addDays(k, 1)) s2.days[k] = fullDay();
-  eq(C.evaluate(s2, at('2026-10-31', 1)).state.attempt.startDate, '2026-10-31');
+  eq([event.type, event.failedDay, state.attempt], ['reset', 5, null]);
+  eq(C.computeStats(state, at('2026-10-31', 12)).attempts, 1); // only the run that ended
+  const again = C.restart(state, '2026-11-02', at('2026-11-02', 9)); // user taps Start later
+  eq([again.attempt.startDate, again.attempts.length], ['2026-11-02', 1]); // nothing extra recorded
+});
+
+await test('End this run: unfinished runs vanish, runs with progress are kept as "stopped"', () => {
+  const fresh = started('2026-11-10');
+  const gone = C.endRun(fresh, at('2026-11-10', 12));
+  eq([gone.attempt, gone.attempts.length], [null, 0]); // never counted as an attempt
+  const going = started('2026-11-05');
+  for (let k = '2026-11-05'; k < '2026-11-09'; k = C.addDays(k, 1)) going.days[k] = fullDay();
+  const ended = C.endRun(going, at('2026-11-09', 12));
+  eq(ended.attempt, null);
+  eq([ended.attempts[0].result, ended.attempts[0].daysCompleted], ['stopped', 4]);
+  eq(C.runDayStatus(ended, ended.attempts[0], '2026-11-06', at('2026-11-09')), 'done');
+  eq(C.endRun(C.defaultState(), at('2026-11-09')).attempt, null); // nothing to end
 });
 
 await test('#8 /sync rejects impossible dates with a 400', async () => {

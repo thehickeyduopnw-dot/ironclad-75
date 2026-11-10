@@ -71,7 +71,7 @@ curl https://<project-ref>.supabase.co/functions/v1/ironclad/summary \
 ```
 
 - `total_days_completed`: fully completed days in the current run.
-- `status`: `active`, `completed` (finished all 75), `not_started` (start date is in the future), `none` (no run), or `not_synced` (the phone hasn't synced yet).
+- `status`: `active`, `completed` (finished all 75), `not_started` (start date is in the future), `none` (not started: nothing counts until the user starts the challenge in the app; a reset no longer starts a new run by itself), or `not_synced` (the phone hasn't synced yet).
 - `attempts`: how many runs there have been, including the current one.
 - `last_reset_date` / `last_reset_missing`: the day that ended the most recent reset run, and what was missed that day (`null` if there's never been a reset).
 

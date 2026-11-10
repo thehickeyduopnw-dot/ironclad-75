@@ -514,6 +514,8 @@ body::after {
 .prep { padding-top: 16px; }
 .prep .group { margin-top: 14px; }
 .prep .btn-primary { margin-top: 8px; }
+.block { display: block; }
+.hero-msg.idle .btn-primary { margin-top: 18px; }
 .btn-link { display: block; margin: 14px auto 0; padding: 10px; color: var(--muted); font-weight: 700; text-decoration: underline; }
 .warn-text { color: var(--warn); font-weight: 700; }
 

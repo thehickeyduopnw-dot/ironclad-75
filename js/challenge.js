@@ -173,19 +173,10 @@ export function lastReadingTitle(state, beforeKey) {
   return '';
 }
 
-// Where a new run starts after a reset on `failedKey`: the next day, when that day
-// is still open (the grace window) and already complete, so it counts as Day 1.
-// Otherwise today. (Starting on a closed or unfinished next day would just set off
-// another reset.)
-export function restartKey(state, failedKey, now) {
-  const next = addDays(failedKey, 1);
-  if (openKeys(now, state.settings.graceHour).includes(next) && isDayComplete(state.days[next])) return next;
-  return dateKey(now);
-}
-
 // Check every closed day of the current run. The first incomplete day ends the run
-// and a new one starts (see restartKey); finishing day 75 completes it. Returns a new
-// state (or the same object when nothing changed) plus the event to show, if any.
+// (the next one starts only when the user starts it); finishing day 75 completes it.
+// Returns a new state (or the same object when nothing changed) plus the event to
+// show, if any.
 export function evaluate(state, now) {
   const a = state.attempt;
   if (!a || a.status !== 'active') return { state, event: null };
@@ -206,7 +197,8 @@ export function evaluate(state, now) {
       };
       const event = { type: 'reset', ...record, attemptNumber: state.attempts.length + 1 };
       return {
-        state: { ...state, attempts: [...state.attempts, record], attempt: newAttempt(restartKey(state, d, now)), pendingEvent: event },
+        // No new run starts by itself: nothing counts until the user starts again.
+        state: { ...state, attempts: [...state.attempts, record], attempt: null, pendingEvent: event },
         event,
       };
     }
@@ -247,6 +239,23 @@ export function restart(state, startKey, now) {
     days[k] = { ...normalizeDay(days[k]), manual: true };
   }
   return { ...state, attempts, days, attempt: newAttempt(startKey), pendingEvent: null };
+}
+
+// Stop the current run without starting another. A run with no finished days isn't
+// counted as an attempt at all; otherwise it goes into history as 'stopped'.
+export function endRun(state, now) {
+  const a = state.attempt;
+  if (!a) return state;
+  if (a.status !== 'active') return { ...state, attempt: null }; // finished runs are already in history
+  const today = dateKey(now);
+  let completed = 0;
+  for (let k = a.startDate; k <= today && dayNumber(a.startDate, k) <= TOTAL_DAYS; k = addDays(k, 1)) {
+    if (isDayComplete(state.days[k])) completed++;
+  }
+  const attempts = completed
+    ? [...state.attempts, { id: a.id, startDate: a.startDate, endDate: today, result: 'stopped', daysCompleted: completed, missing: [] }]
+    : state.attempts;
+  return { ...state, attempts, attempt: null, pendingEvent: null };
 }
 
 // ---- Calendar and stats -------------------------------------------------
