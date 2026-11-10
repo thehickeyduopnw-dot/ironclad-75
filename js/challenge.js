@@ -258,6 +258,12 @@ export function endRun(state, now) {
   return { ...state, attempts, attempt: null, pendingEvent: null };
 }
 
+// Wipe all runs and logged days (e.g. test runs) but keep settings, the calorie and
+// macro profile, and the cloud link. Photos are cleared separately (store.js).
+export function clearHistory(state) {
+  return { ...state, attempt: null, attempts: [], days: {}, pendingEvent: null };
+}
+
 // ---- Calendar and stats -------------------------------------------------
 
 // Status of one date within a run, for the calendar grid. `run` is the current

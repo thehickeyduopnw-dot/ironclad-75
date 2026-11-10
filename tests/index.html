@@ -250,6 +250,7 @@ function mockEnv(nowIso = '2026-10-31T19:00:00Z') {
       getKV: async (k) => structuredClone(kv.get(k) ?? null),
       setKV: async (k, v) => { if (v == null) kv.delete(k); else kv.set(k, structuredClone(v)); },
       upsertDays: async (rows) => rows.forEach((r) => days.set(r.date, structuredClone(r))),
+      deleteAllDays: async () => days.clear(),
       getDays: async (from, to) => [...days.values()].filter((r) => r.date >= from && r.date <= to).sort((a, b) => (a.date < b.date ? 1 : -1)).map((r) => ({ date: r.date, data: r.data })),
     },
   };
@@ -581,6 +582,24 @@ await test('a reset waits for a manual start; the next attempt is numbered after
   eq(C.computeStats(state, at('2026-10-31', 12)).attempts, 1); // only the run that ended
   const again = C.restart(state, '2026-11-02', at('2026-11-02', 9)); // user taps Start later
   eq([again.attempt.startDate, again.attempts.length], ['2026-11-02', 1]); // nothing extra recorded
+});
+
+await test('Clear test runs: wipes runs and days, keeps settings; backend drops its copy', async () => {
+  const s = { ...started('2026-11-01'), attempts: [{ startDate: '2026-10-01', endDate: '2026-10-03', result: 'reset', daysCompleted: 2, missing: [] }] };
+  s.days['2026-11-01'] = fullDay();
+  s.settings.graceHour = 1;
+  s.profile = { age: '34' };
+  const c = C.clearHistory(s);
+  eq([c.attempt, c.attempts, c.days, c.settings.graceHour, c.profile.age], [null, [], {}, 1, '34']);
+  eq(C.computeStats(c, at('2026-11-10')).attempts, 0);
+  // Backend: a sync with reset:true removes old days and queued Muse changes.
+  const { env, secret, key } = await runningEnv();
+  await api(env, 'POST', '/log', { key, body: { tasks: { diet: true } } });
+  eq(env.days.size > 0 && env.kv.get('pending_changes').length, 1);
+  eq((await api(env, 'POST', '/sync', { secret, body: { progress: { status: 'none', tz: 'America/Los_Angeles' }, days: [], reset: true } })).status, 200);
+  eq([env.days.size, env.kv.has('pending_changes')], [0, false]);
+  const h = (await api(env, 'GET', '/history?days=3', { key })).data.days;
+  eq(h.every((d) => !d.in_run && !Object.values(d.tasks).some((t) => t.done)), true);
 });
 
 await test('End this run: unfinished runs vanish, runs with progress are kept as "stopped"', () => {

@@ -399,6 +399,12 @@ export async function handle(req, env) {
         const bad = days.find((d) => !isRealDate(d?.date));
         if (bad) return fail(400, `Invalid day date: ${JSON.stringify(bad?.date ?? null)}.`);
         const nowIso = env.now().toISOString();
+        // "Clear test runs" on the phone: drop every stored day and anything still queued.
+        if (body.reset === true) {
+          await env.db.deleteAllDays();
+          await env.db.setKV('pending_changes', null);
+          await env.db.setKV('reminder_last_sent', null);
+        }
         if (days.length) {
           await env.db.upsertDays(days.map((d) => ({ date: d.date, day_number: d.day_number ?? null, data: d, updated_at: nowIso })));
         }
@@ -508,6 +514,7 @@ export function restDb(baseUrl, serviceKey) {
       ? rest(`kv?key=eq.${encodeURIComponent(key)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } })
       : rest('kv', { method: 'POST', headers: upsert, body: JSON.stringify({ key, value, updated_at: new Date().toISOString() }) })),
     upsertDays: (rows) => rest('days', { method: 'POST', headers: upsert, body: JSON.stringify(rows) }),
+    deleteAllDays: () => rest('days?date=gte.0001-01-01', { method: 'DELETE', headers: { Prefer: 'return=minimal' } }),
     getDays: (from, to) => rest(`days?date=gte.${from}&date=lte.${to}&select=date,data&order=date.desc`),
   };
 }

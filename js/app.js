@@ -134,7 +134,17 @@ function save() {
 // Test mode never syncs: practice data must not reach the real backend.
 
 const cloudOn = () => !clock.isDebug && !storageBroken && cloud.linked(state.cloud);
-const cloudHooks = { payload: () => cloudPayload(), apply: (changes) => applyRemoteChanges(changes) };
+const cloudHooks = {
+  payload: () => cloudPayload(),
+  apply: (changes) => applyRemoteChanges(changes),
+  // After "Clear test runs", the backend is told once to drop its copy too.
+  synced: (sent) => {
+    if (sent.reset && state.cloud.resetPending) {
+      state = { ...state, cloud: { ...state.cloud, resetPending: false } };
+      save();
+    }
+  },
+};
 const syncSoon = () => { if (cloudOn()) cloud.scheduleSync(state.cloud, cloudHooks); };
 const syncNow = () => cloud.syncNow(state.cloud, cloudHooks);
 
@@ -201,6 +211,7 @@ function cloudPayload() {
     },
     days,
     applied_ids: (state.cloud.appliedIds || []).slice(-100),
+    reset: !!state.cloud.resetPending,
     reminder: { time: state.settings.reminderTime, enabled: state.settings.reminderPush !== false },
   };
 }
@@ -674,6 +685,9 @@ function renderSettings() {
         <li><span><b>#${history.length - i}</b> ${fmtDate(h.startDate)} – ${fmtDate(h.endDate)}</span>
         <span class="tag ${h.result}">${resultLabel[h.result]} · ${h.daysCompleted}d</span></li>`).join('')}</ul>`
         : '<p class="muted">No past attempts yet.</p>'}
+      ${history.length || a || Object.keys(state.days).length || photoList.length ? `
+        <button class="btn-danger" data-action="clear-history">Clear test runs</button>
+        <small class="muted pad-b block">Deletes every attempt, logged day and progress photo so your first real start is attempt #1. Keeps your settings, calorie &amp; macro numbers, and Cloud &amp; Muse link.</small>` : ''}
     </div>
 
     ${remindersGroup()}
@@ -1454,6 +1468,25 @@ const actions = {
     viewKey = null;
     save();
     showToday();
+  },
+  async 'clear-history'(el) {
+    const n = state.attempts.length + (state.attempt?.status === 'active' ? 1 : 0);
+    if (!confirm(`Delete ${n ? `all ${n} attempt${n === 1 ? '' : 's'}, ` : ''}every logged day and every progress photo? This can't be undone. (Export a backup first if you might want them.)`)) return;
+    busy(el, 'Clearing…', async () => {
+      await store.clearPhotos();
+      for (const url of photoUrls.values()) URL.revokeObjectURL(url);
+      photoUrls.clear();
+      photoList = [];
+      state = C.clearHistory(state);
+      if (cloud.linked(state.cloud)) state = { ...state, cloud: { ...state.cloud, resetPending: true } };
+      prepFor = null;
+      viewKey = null;
+      calRun = null;
+      calKey = null;
+      save();
+      showToday();
+      toast('Cleared. Your first real start will be attempt #1.');
+    });
   },
   explore() {
     state = { ...state, explored: true };

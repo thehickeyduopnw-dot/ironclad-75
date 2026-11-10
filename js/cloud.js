@@ -62,8 +62,10 @@ export async function syncNow(cloud, hooks) {
   running = true;
   try {
     await pullChanges(cloud, hooks);
-    await app(cloud, '/sync', { body: hooks.payload() });
+    const payload = hooks.payload();
+    await app(cloud, '/sync', { body: payload });
     try { localStorage.setItem(LAST_SYNC_KEY, String(Date.now())); } catch {}
+    hooks.synced?.(payload);
   } finally {
     running = false;
     if (again) { again = false; scheduleSync(cloud, hooks, 500); }
