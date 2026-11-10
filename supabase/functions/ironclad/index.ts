@@ -418,7 +418,7 @@ export async function handle(req, env) {
         }
         if (body.progress) await env.db.setKV('progress', { ...body.progress, synced_at: nowIso });
         if (body.reminder) await env.db.setKV('reminder', { time: body.reminder.time || '20:00', enabled: !!body.reminder.enabled });
-        return json({ ok: true, days: days.length });
+        return json({ ok: true, days: days.length, reset: body.reset === true });
       }
       case 'POST /log': {
         const { progress, today } = await context(env);

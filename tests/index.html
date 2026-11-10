@@ -596,7 +596,8 @@ await test('Clear test runs: wipes runs and days, keeps settings; backend drops 
   const { env, secret, key } = await runningEnv();
   await api(env, 'POST', '/log', { key, body: { tasks: { diet: true } } });
   eq(env.days.size > 0 && env.kv.get('pending_changes').length, 1);
-  eq((await api(env, 'POST', '/sync', { secret, body: { progress: { status: 'none', tz: 'America/Los_Angeles' }, days: [], reset: true } })).status, 200);
+  const res = await api(env, 'POST', '/sync', { secret, body: { progress: { status: 'none', tz: 'America/Los_Angeles' }, days: [], reset: true } });
+  eq([res.status, res.data.reset], [200, true]); // the phone stops asking only after this
   eq([env.days.size, env.kv.has('pending_changes')], [0, false]);
   const h = (await api(env, 'GET', '/history?days=3', { key })).data.days;
   eq(h.every((d) => !d.in_run && !Object.values(d.tasks).some((t) => t.done)), true);

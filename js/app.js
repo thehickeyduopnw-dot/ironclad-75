@@ -137,9 +137,10 @@ const cloudOn = () => !clock.isDebug && !storageBroken && cloud.linked(state.clo
 const cloudHooks = {
   payload: () => cloudPayload(),
   apply: (changes) => applyRemoteChanges(changes),
-  // After "Clear test runs", the backend is told once to drop its copy too.
-  synced: (sent) => {
-    if (sent.reset && state.cloud.resetPending) {
+  // After "Clear test runs", the backend is asked to drop its copy too, on every
+  // sync until it confirms (an older backend ignores the request).
+  synced: (sent, res) => {
+    if (sent.reset && res?.reset === true && state.cloud.resetPending) {
       state = { ...state, cloud: { ...state.cloud, resetPending: false } };
       save();
     }

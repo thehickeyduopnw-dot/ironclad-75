@@ -6,7 +6,7 @@
 import { dateKey, dayNumber, missingTasks } from './js/challenge.js';
 import { loadState } from './js/store.js';
 
-const VERSION = 'ironclad-v15';
+const VERSION = 'ironclad-v16';
 const SHELL = [
   './',
   './index.html',
