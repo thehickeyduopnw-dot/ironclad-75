@@ -204,6 +204,27 @@ test('unit switch converts entered values', () => {
   eq(K.convertUnits(imp, 'metric').heightCm, '180');
 });
 
+test('macros: grams from the calorie target and a preset split', () => {
+  const m = K.macros(base); // very active, maintain: target 3,070 cal, balanced 30/40/30
+  eq(m.calories, 3070);
+  eq([m.protein.g, m.carbs.g, m.fat.g], [230, 307, 102]); // 921/4, 1228/4, 921/9
+  eq([m.protein.pct, m.carbs.pct, m.fat.pct], [30, 40, 30]);
+  eq(m.perMeal, { protein: 77, carbs: 102, fat: 34 }); // 3 meals
+  eq(m.proteinPerLb, 1.3); // 230 g / 176 lb
+  eq(K.macros({ ...base, meals: '5' }).perMeal.protein, 46);
+});
+
+test('macros: own calorie number, custom split, and missing inputs', () => {
+  const own = K.macros({ ...base, calorieOverride: '2000', macroPreset: 'high_protein' });
+  eq([own.calories, own.own, own.protein.g, own.carbs.g, own.fat.g], [2000, true, 200, 150, 67]);
+  eq(K.macros({ ...base, calorieOverride: '50' }).calories, 3070); // out of range: falls back to the target
+  eq(K.macros({ ...base, macroPreset: 'custom', customP: '50', customC: '30', customF: '30' }), null); // 110%
+  eq(K.macros({ ...base, macroPreset: 'custom', customP: '35', customC: '35', customF: '30' }).protein.g, 269);
+  eq(K.macros(K.defaultProfile()), null); // nothing entered
+  const noBody = K.macros({ ...K.defaultProfile(), calorieOverride: '1800' });
+  eq([noBody.calories, noBody.proteinPerLb], [1800, null]);
+});
+
 await test('photos map to their run and day', () => {
   const s = started('2026-10-20');
   s.attempts = [{ startDate: '2026-10-01', endDate: '2026-10-10', result: 'reset', daysCompleted: 9, missing: [] }];

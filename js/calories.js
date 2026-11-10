@@ -19,11 +19,25 @@ export const GOALS = [
 const LB_KG = 0.45359237;
 const IN_CM = 2.54;
 
+// Macro splits as % of calories: protein / carbs / fat.
+export const MACRO_PRESETS = [
+  { id: 'balanced', label: 'Balanced', p: 30, c: 40, f: 30 },
+  { id: 'high_protein', label: 'High protein', p: 40, c: 30, f: 30 },
+  { id: 'lower_carb', label: 'Lower carb', p: 40, c: 20, f: 40 },
+  { id: 'keto', label: 'Keto', p: 25, c: 5, f: 70 },
+  { id: 'custom', label: 'Custom' },
+];
+
 export function defaultProfile() {
   return {
     sex: 'male', age: '', units: 'imperial',
     heightFt: '', heightIn: '', weightLb: '', heightCm: '', weightKg: '',
     activity: 'very', goal: 'maintain',
+    calculated: false, // results show once Calculate has been tapped
+    calorieOverride: '', // own calorie number for macros; blank = use the target
+    macroPreset: 'balanced', customP: '30', customC: '40', customF: '30',
+    meals: 3,
+    macrosCalculated: false,
   };
 }
 
@@ -73,5 +87,49 @@ export function convertUnits(p, units) {
     heightFt: heightCm ? String(Math.floor(totalIn / 12)) : '',
     heightIn: heightCm ? String(totalIn % 12) : '',
     weightLb: weightKg ? String(Math.round(weightKg / LB_KG)) : '',
+  };
+}
+
+// ---- Macros ------------------------------------------------------------------------
+
+export const MIN_CALORIES = 800;
+export const MAX_CALORIES = 8000;
+
+// The protein/carbs/fat percentages in use, or null if a custom split doesn't add up to 100.
+export function macroSplit(p) {
+  const preset = MACRO_PRESETS.find((m) => m.id === p.macroPreset) ?? MACRO_PRESETS[0];
+  if (preset.id !== 'custom') return { p: preset.p, c: preset.c, f: preset.f };
+  const split = { p: num(p.customP), c: num(p.customC), f: num(p.customF) };
+  if ([split.p, split.c, split.f].some((x) => x < 0) || Math.round(split.p + split.c + split.f) !== 100) return null;
+  return split;
+}
+
+// Calories the macros are based on: the user's own number if valid, else the target.
+export function calorieBasis(p) {
+  const own = num(p.calorieOverride);
+  if (own >= MIN_CALORIES && own <= MAX_CALORIES) return { calories: Math.round(own), own: true };
+  const est = estimate(p);
+  return est ? { calories: est.target, own: false } : null;
+}
+
+// Daily grams (4 cal/g protein and carbs, 9 cal/g fat), per meal, and protein per lb.
+export function macros(p) {
+  const basis = calorieBasis(p);
+  const split = macroSplit(p);
+  if (!basis || !split) return null;
+  const part = (pct, calPerGram) => {
+    const cal = (basis.calories * pct) / 100;
+    return { pct, cal: Math.round(cal), g: Math.round(cal / calPerGram) };
+  };
+  const protein = part(split.p, 4);
+  const carbs = part(split.c, 4);
+  const fat = part(split.f, 9);
+  const meals = Math.min(8, Math.max(1, Math.round(num(p.meals)) || 3));
+  const { weightKg } = metrics(p);
+  return {
+    ...basis,
+    protein, carbs, fat, meals,
+    perMeal: { protein: Math.round(protein.g / meals), carbs: Math.round(carbs.g / meals), fat: Math.round(fat.g / meals) },
+    proteinPerLb: weightKg > 0 ? Math.round((protein.g / (weightKg / LB_KG)) * 100) / 100 : null,
   };
 }

@@ -20,6 +20,7 @@ let openSignature = '';
 let celebrated = false; // confetti plays once per win screen
 let installPrompt = null; // Chrome/Android's deferred install prompt
 let storageBroken = false; // saved data failed to load: don't overwrite it
+let prepFor = null; // Today shows the prep page: 'start' (before the first run) or 'restart'
 let calRun = null; // calendar: null = current run, else index into state.attempts
 let calKey = null; // calendar: selected date
 let photoList = []; // sorted date keys that have a stored photo
@@ -39,12 +40,20 @@ const CAMERA_ICON = '<svg class="cam" viewBox="0 0 24 24" aria-hidden="true"><pa
 
 // ---- Startup -------------------------------------------------------------
 
+// Calculator settings. Profiles saved before the Calculate button existed, with the
+// numbers already filled in, keep showing their results.
+function withProfileDefaults(saved) {
+  const profile = { ...K.defaultProfile(), ...saved };
+  if (saved && saved.calculated === undefined && K.estimate(profile)) profile.calculated = true;
+  return profile;
+}
+
 // Fill in fields added by newer versions of the app.
 function withDefaults(s) {
   return {
     ...s,
     settings: { ...C.defaultState().settings, ...s.settings },
-    profile: { ...K.defaultProfile(), ...s.profile },
+    profile: withProfileDefaults(s.profile),
     cloud: { url: '', secret: '', pushToken: null, ...s.cloud },
   };
 }
@@ -264,8 +273,9 @@ function renderToday() {
   const today = C.dateKey(now);
   const a = state.attempt;
 
-  if (!a) return onboarding();
+  if (!a) return prepFor === 'start' ? prepView() : onboarding();
   if (a.status === 'completed') return victory();
+  if (prepFor === 'restart') return prepView();
   if (a.startDate > today) {
     const wait = C.daysBetween(today, a.startDate);
     return `<section class="hero-msg">
@@ -471,7 +481,10 @@ function taskCards(day) {
 }
 
 function dietSub() {
-  const est = K.estimate(state.profile);
+  const p = state.profile;
+  const m = p.macrosCalculated ? K.macros(p) : null;
+  if (m) return `No cheat meals · ${m.calories.toLocaleString()} cal · ${m.protein.g}P ${m.carbs.g}C ${m.fat.g}F`;
+  const est = p.calculated ? K.estimate(p) : null;
   return est ? `No cheat meals · ${est.target.toLocaleString()} cal target` : 'No cheat meals';
 }
 
@@ -532,13 +545,31 @@ function onboarding() {
     <h1 class="title">75 days.<br>7 tasks.<br><span class="accent">No days off.</span></h1>
     <ol class="rules">${items.map((i) => `<li>${i}</li>`).join('')}</ol>
     <p class="lead">Miss anything by midnight and you're back to Day 1.</p>
-    <button class="btn-primary" data-action="start-today">Start Day 1 today</button>
-    <div class="alt-start">
-      <label for="start-date" class="muted">Or start on another date</label>
-      <div class="row"><input type="date" id="start-date" class="field" min="${earliestStart()}" value="${C.dateKey(clock.now())}"><button class="btn-secondary" data-action="start-on-date">Set</button></div>
-    </div>
+    <button class="btn-primary" data-action="prep-next">Next: set your calories &amp; macros</button>
     ${installPrompt && !isInstalled() ? '<button class="btn-secondary install-btn" data-action="install">Install app on this phone</button>' : ''}
     ${isIOS && !isInstalled() ? `<p class="banner ios-install"><b>Install first.</b> On iPhone, the home-screen app keeps its own log, separate from Safari. ${installHelp()}</p>` : ''}
+  </section>`;
+}
+
+// Prep before Day 1: calories and macros. Shown before the first run (with the start
+// buttons) and again after a reset or restart (the new run has already begun).
+function prepView() {
+  const starting = !state.attempt || state.attempt.status !== 'active';
+  const n = starting ? 1 : C.dayNumber(state.attempt.startDate, C.dateKey(clock.now()));
+  return `<section class="prep">
+    <p class="eyebrow">${starting ? 'Prep · before Day 1' : `Attempt #${attemptNumber()} · Prep`}</p>
+    <h1 class="title">Set your<br><span class="accent">numbers.</span></h1>
+    <p class="lead">"Follow your diet" is one of the 7 tasks. Work out the calories and macros you'll stick to${starting ? '' : ' this time'}. You can change them any time on the Stats tab.</p>
+    ${calorieGroup()}
+    ${macroGroup()}
+    ${starting ? `
+      <button class="btn-primary" data-action="start-today">Start Day 1 today</button>
+      <div class="alt-start">
+        <label for="start-date" class="muted">Or start on another date</label>
+        <div class="row"><input type="date" id="start-date" class="field" min="${earliestStart()}" value="${C.dateKey(clock.now())}"><button class="btn-secondary" data-action="start-on-date">Set</button></div>
+      </div>
+      <button class="btn-link" data-action="prep-back">Back</button>`
+    : `<button class="btn-primary" data-action="prep-done">I'm ready: go to Day ${n}</button>`}
   </section>`;
 }
 
@@ -576,7 +607,7 @@ function renderOverlay() {
       <div><b>${bestRun()}</b><span>best run</span></div>
       <div><b>${state.attempts.length}</b><span>attempts so far</span></div>
     </div>
-    <button class="btn-primary" data-action="ack">Start Day 1 today</button>
+    <button class="btn-primary" data-action="ack">Next: prep for Day 1</button>
   </div>`;
 }
 
@@ -757,27 +788,38 @@ function statsTiles() {
 }
 
 function renderStats() {
-  const p = state.profile;
-  const imperial = p.units === 'imperial';
-  const seg = (key, value, label) =>
-    `<button class="seg-btn ${p[key] === value ? 'on' : ''}" data-action="profile" data-key="${key}" data-v="${value}" aria-pressed="${p[key] === value}"><b>${label}</b></button>`;
-  const input = (key, label, unit, attrs = '') =>
-    `<label class="calc-field"><span>${label}</span><span class="calc-input"><input type="number" inputmode="decimal" data-profile="${key}" value="${esc(p[key])}" ${attrs}><small>${unit}</small></span></label>`;
-
   return `<section class="stats">
     <h2 class="screen-title">Stats</h2>
     ${statsTiles()}
+    ${calorieGroup()}
+    ${macroGroup()}
+  </section>`;
+}
 
-    <div class="group calc">
+// ---- Nutrition: calorie burn (TDEE) and macros. Used on Stats and the prep page. ----
+
+const fmtNum = (n) => n.toLocaleString();
+
+function profileSeg(key, value, label) {
+  const on = String(state.profile[key]) === String(value);
+  return `<button class="seg-btn ${on ? 'on' : ''}" data-action="profile" data-key="${key}" data-v="${value}" aria-pressed="${on}"><b>${label}</b></button>`;
+}
+
+function profileInput(key, label, unit, attrs = '') {
+  return `<label class="calc-field"><span>${label}</span><span class="calc-input"><input type="number" inputmode="decimal" data-profile="${key}" value="${esc(state.profile[key])}" ${attrs}><small>${unit}</small></span></label>`;
+}
+
+function calorieGroup() {
+  const p = state.profile;
+  const imperial = p.units === 'imperial';
+  return `<div class="group calc" id="calories">
       <h3>Daily calorie burn</h3>
-      <div id="calc-result" class="calc-result">${calcResult()}</div>
-
-      <div class="seg calc-seg">${seg('sex', 'male', 'Male')}${seg('sex', 'female', 'Female')}</div>
+      <div class="seg calc-seg">${profileSeg('sex', 'male', 'Male')}${profileSeg('sex', 'female', 'Female')}</div>
       <div class="calc-grid">
-        ${input('age', 'Age', 'yrs', 'min="13" max="100"')}
+        ${profileInput('age', 'Age', 'yrs', 'min="13" max="100"')}
         ${imperial
-          ? `${input('weightLb', 'Weight', 'lb')}${input('heightFt', 'Height', 'ft', 'min="3" max="8"')}${input('heightIn', '&nbsp;', 'in', 'min="0" max="11"')}`
-          : `${input('weightKg', 'Weight', 'kg')}${input('heightCm', 'Height', 'cm')}`}
+          ? `${profileInput('weightLb', 'Weight', 'lb')}${profileInput('heightFt', 'Height', 'ft', 'min="3" max="8"')}${profileInput('heightIn', '&nbsp;', 'in', 'min="0" max="11"')}`
+          : `${profileInput('weightKg', 'Weight', 'kg')}${profileInput('heightCm', 'Height', 'cm')}`}
       </div>
 
       <label class="calc-label" for="calc-activity">Activity level</label>
@@ -792,30 +834,92 @@ function renderStats() {
 
       <div class="calc-units">
         <span class="muted">Units</span>
-        <div class="seg">${seg('units', 'imperial', 'lb / ft')}${seg('units', 'metric', 'kg / cm')}</div>
+        <div class="seg">${profileSeg('units', 'imperial', 'lb / ft')}${profileSeg('units', 'metric', 'kg / cm')}</div>
       </div>
-      <p class="muted fine">Estimate using the Mifflin-St Jeor equation. Not medical advice.</p>
-    </div>
 
-  </section>`;
+      <button class="btn-primary calc-btn" data-action="calc-calories">Calculate</button>
+      <div id="calc-result" class="calc-result">${calcResult()}</div>
+      <p class="muted fine">Estimate using the Mifflin-St Jeor equation. Not medical advice.</p>
+    </div>`;
 }
 
 function calcResult() {
+  if (!state.profile.calculated) return '';
   const est = K.estimate(state.profile);
-  if (!est) return '<p class="muted calc-empty">Enter your age, weight and height to see your daily burn.</p>';
-  const fmt = (n) => n.toLocaleString();
+  if (!est) return '<p class="warn-text fine">Enter your age, weight and height, then tap Calculate.</p>';
   return `
-    <div class="calc-big"><b>${fmt(est.tdee)}</b><span>calories burned / day</span></div>
-    <div class="calc-row"><span>Resting (BMR)</span><b>${fmt(est.bmr)}</b></div>
-    <div class="calc-row target"><span>Eat to ${est.goal.label.toLowerCase()}</span><b>${fmt(est.target)}</b></div>
+    <div class="calc-big"><b>${fmtNum(est.tdee)}</b><span>calories burned / day</span></div>
+    <div class="calc-row"><span>Resting (BMR)</span><b>${fmtNum(est.bmr)}</b></div>
+    <div class="calc-row target"><span>Eat to ${est.goal.label.toLowerCase()}</span><b>${fmtNum(est.target)}</b></div>
     ${est.floored ? '<p class="fine warn-text">Raised to the safe minimum for your sex.</p>' : ''}`;
 }
 
+function macroGroup() {
+  const p = state.profile;
+  const basis = K.calorieBasis({ ...p, calorieOverride: '' });
+  const custom = p.macroPreset === 'custom';
+  return `<div class="group calc" id="macros">
+      <h3>Daily macros</h3>
+      <label class="calc-field"><span>Calories per day</span>
+        <span class="calc-input"><input type="number" inputmode="numeric" data-profile="calorieOverride" value="${esc(p.calorieOverride)}"
+          placeholder="${basis ? fmtNum(basis.calories) : 'e.g. 2200'}" min="${K.MIN_CALORIES}" max="${K.MAX_CALORIES}"><small>cal</small></span></label>
+      <small class="muted">${basis ? `Leave blank to use your calorie target (${fmtNum(basis.calories)}).` : 'Use the calculator above, or type your own number.'}</small>
+
+      <label class="calc-label" for="macro-preset">Diet style</label>
+      <select id="macro-preset" class="calc-select" data-profile="macroPreset">
+        ${K.MACRO_PRESETS.map((m) => `<option value="${m.id}" ${p.macroPreset === m.id ? 'selected' : ''}>${m.label}${m.id === 'custom' ? '' : ` (${m.p}% protein · ${m.c}% carbs · ${m.f}% fat)`}</option>`).join('')}
+      </select>
+      ${custom ? `<div class="calc-grid three">
+          ${profileInput('customP', 'Protein', '%', 'min="0" max="100"')}
+          ${profileInput('customC', 'Carbs', '%', 'min="0" max="100"')}
+          ${profileInput('customF', 'Fat', '%', 'min="0" max="100"')}
+        </div>
+        <small class="muted">The three must add up to 100%.</small>` : ''}
+
+      <label class="calc-label">Meals per day</label>
+      <div class="seg four">${[3, 4, 5, 6].map((n) => profileSeg('meals', n, String(n))).join('')}</div>
+
+      <button class="btn-primary calc-btn" data-action="calc-macros">Calculate macros</button>
+      <div id="macro-result" class="calc-result">${macroResult()}</div>
+    </div>`;
+}
+
+function macroResult() {
+  const p = state.profile;
+  if (!p.macrosCalculated) return '';
+  const m = K.macros(p);
+  if (!m) {
+    return !K.macroSplit(p)
+      ? '<p class="warn-text fine">Your custom protein, carbs and fat need to add up to 100%.</p>'
+      : '<p class="warn-text fine">Enter a calorie number, or fill in the calorie calculator above.</p>';
+  }
+  const tile = (label, part) => `<div class="tile macro-tile"><b>${part.g}<small>g</small></b><span>${label}</span><small>${part.pct}% · ${fmtNum(part.cal)} cal</small></div>`;
+  return `
+    <p class="muted fine">For ${fmtNum(m.calories)} calories a day${m.own ? ' (your number)' : ''}:</p>
+    <div class="tiles macro-tiles">${tile('protein', m.protein)}${tile('carbs', m.carbs)}${tile('fat', m.fat)}</div>
+    <div class="calc-row"><span>Per meal (${m.meals} a day)</span><b>${m.perMeal.protein}P · ${m.perMeal.carbs}C · ${m.perMeal.fat}F g</b></div>
+    ${m.proteinPerLb != null ? `<div class="calc-row"><span>Protein per lb of body weight</span><b>${m.proteinPerLb.toFixed(2)} g</b></div>` : ''}
+    <p class="muted fine">Protein and carbs have 4 calories per gram, fat 9. These show on your Diet card each day.</p>`;
+}
+
+// Inputs save as you type; results refresh live once Calculate has been tapped.
 function setProfile(patch) {
   state = { ...state, profile: { ...state.profile, ...patch } };
   save();
-  const el = screen.querySelector('#calc-result');
-  if (el) el.innerHTML = calcResult();
+  if ('macroPreset' in patch) return render(); // shows or hides the custom % fields
+  const calc = screen.querySelector('#calc-result');
+  if (calc) calc.innerHTML = calcResult();
+  const mac = screen.querySelector('#macro-result');
+  if (mac) mac.innerHTML = macroResult();
+}
+
+// Tap Calculate: show results, close the keyboard, bring them into view.
+function showResult(flag, id) {
+  document.activeElement?.blur?.();
+  state = { ...state, profile: { ...state.profile, [flag]: true } };
+  save();
+  render();
+  screen.querySelector(id)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 // ---- Photos --------------------------------------------------------------------
@@ -1087,8 +1191,12 @@ function startRun(startKey) {
     const days = C.daysBetween(startKey, today);
     if (!confirm(`Start on ${fmtDate(startKey)}? The ${days} day${days === 1 ? '' : 's'} before today will count as completed off-app.`)) return;
   }
+  // Starting over (not the very first start, which already went through prep):
+  // show the prep page so calories and macros get a look before Day 1.
+  const firstStart = prepFor === 'start';
   state = C.restart(state, startKey, clock.now());
   viewKey = null;
+  prepFor = firstStart ? null : 'restart';
   save();
   showToday();
 }
@@ -1303,10 +1411,33 @@ const actions = {
     startRun(C.dateKey(clock.now()));
   },
   ack() {
+    if (state.pendingEvent?.type === 'reset') prepFor = 'restart'; // review calories & macros first
     state = { ...state, pendingEvent: null };
     save();
     viewKey = null;
     showToday();
+  },
+  'prep-next'() {
+    prepFor = 'start';
+    render();
+    window.scrollTo(0, 0);
+  },
+  'prep-back'() {
+    prepFor = null;
+    render();
+    window.scrollTo(0, 0);
+  },
+  'prep-done'() {
+    prepFor = null;
+    render();
+    window.scrollTo(0, 0);
+  },
+  'calc-calories'() {
+    if (!K.estimate(state.profile)) toast('Enter your age, weight and height first.');
+    showResult('calculated', '#calc-result');
+  },
+  'calc-macros'() {
+    showResult('macrosCalculated', '#macro-result');
   },
   dbg(el) {
     const v = el.dataset.v;
